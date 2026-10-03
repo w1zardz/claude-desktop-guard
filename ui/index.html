@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Claude Desktop Guard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="rail">
+    <div class="brand"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 3 41 10v12c0 11-8 19-17 23C15 41 7 33 7 22V10Z" fill="currentColor"/><path d="M16 24h16M24 16v16" stroke="white" stroke-width="4" stroke-linecap="round"/></svg><span>Claude<br>Desktop Guard</span></div>
+    <div class="rail-copy">Один выбранный выход.<br>Прозрачные проверки.<br>Контроль соединений.</div>
+    <div class="rail-bottom"><div id="desktop-info">Проверяем приложение…</div><p>macOS & Windows</p><span class="version">v0.1.0 · MIT</span></div>
+  </aside>
+  <main>
+    <header><div><h1>Маршрут под контролем</h1><p>Запускайте вкладку Code через проверенный прокси.</p></div><div id="status" class="status" role="status"><i></i><span>Не запущен</span></div></header>
+    <section class="route" aria-label="Маршрут соединений"><div><span class="route-icon">C</span><strong>Claude Desktop</strong><small>Интерфейс и Code</small></div><span class="wire" aria-hidden="true"></span><div class="guard-node"><span class="route-icon">G</span><strong>Локальный барьер</strong><small id="local-address">Ожидает запуска</small></div><span class="wire" aria-hidden="true"></span><div><span class="route-icon">↗</span><strong>Ваш прокси</strong><small id="exit-summary">Выход ещё не выбран</small></div></section>
+    <div id="error" class="error" role="alert" hidden></div>
+    <section class="configuration"><h2>Выберите выход</h2><label for="proxy-url">Адрес локального HTTP-прокси</label><div class="input-action"><input id="proxy-url" type="url" placeholder="http://127.0.0.1:порт" autocomplete="off" spellcheck="false"><button id="probe-button" class="secondary">Проверить выход</button></div><p class="hint">Используйте HTTP-вход вашего VPN или Clash/Mihomo. Адрес вводится явно; прямого резервного маршрута у барьера нет.</p>
+      <div id="probe-result" class="probe-result" hidden><div><small>Проверенный выход</small><strong id="probe-ip"></strong><span id="probe-country"></span></div><button id="pin-button" class="secondary">Закрепить этот IP</button></div>
+      <div class="pin-row"><div><small>Закреплённый IP</small><strong id="pinned-ip">Не выбран</strong></div><div><small>Страна выхода</small><strong id="pinned-country">Не выбрана</strong></div><div><small>Результат проверки</small><strong id="health-label">Ожидает выбора</strong></div></div>
+      <details id="mihomo-options"><summary>Привязка конкретного узла Clash / Mihomo</summary><p class="hint">Дополнительная проверка выбранного узла. Сам Mihomo должен отправлять трафик Claude через эту группу. Guard проверяет группу, но не меняет правила маршрутизации.</p><div class="form-grid"><label>Адрес контроллера<input id="controller-url" placeholder="http://127.0.0.1:порт" autocomplete="off" spellcheck="false"></label><label>Ключ контроллера<input id="controller-secret" type="password" placeholder="Только на текущий запуск" autocomplete="off"></label><label>Имя группы<input id="selector" placeholder="Выберите свою группу" autocomplete="off"></label><label>Имя конечного узла<input id="expected-leaf" placeholder="Укажите выбранный узел" autocomplete="off"></label></div></details>
+      <label id="sandbox-option" class="toggle" hidden><input id="strict-mac" type="checkbox"><span><strong>Строгая блокировка прямой сети на macOS</strong><small>Песочница ограничит запущенное дерево процессов соединениями с барьером. SSH, Git, локальные previews/MCP/browser bridge могут перестать работать. Внешний браузер и отдельные системные службы остаются вне неё.</small></span></label>
+      <div class="actions"><button id="start-button" class="primary" disabled>Запустить Claude через Guard</button><button id="stop-button" class="danger" hidden>Остановить барьер</button><button id="restore-button" class="text-button" hidden>Восстановить настройки</button></div><p id="transaction-note" class="hint" hidden>Настройки Claude привязаны к барьеру. Перед восстановлением завершите Claude Desktop.</p>
+    </section>
+    <section class="foot-grid"><div><h2>Окружение</h2><dl><dt>Часовой пояс устройства</dt><dd id="system-timezone">—</dd><dt>Часовой пояс выхода</dt><dd id="exit-timezone">—</dd><dt>Последняя проверка</dt><dd id="checked-at">—</dd></dl><p class="hint">Проверка часового пояса показывает различия. Guard не меняет системные настройки и не обещает маскировку отпечатка Desktop.</p></div><div><h2>Что покрыто</h2><p>HTTPS-туннели через барьер закрываются при смене IP, страны, узла или сбое проверки. В Windows полная блокировка прямой сети требует VPN kill switch или отдельного firewall.</p><p class="hint">Обновления, внешний браузер, Cloud, SSH, WSL, проектные прокси и ранее запущенные процессы требуют отдельного контроля. Проверки IP не подтверждают маршрут каждого домена. Защита от бана не гарантируется.</p></div></section>
+    <section class="diagnostics"><details><summary>Проверки совместимости и журнал</summary><ul id="findings"></ul><ol id="history"></ol><p class="hint">Промпты и cookies не читаются. HTTPS не расшифровывается. Резервная копия настроек может содержать ваши секреты; она хранится локально. Проверки IP обращаются к ipify и ipinfo через выбранный прокси.</p></details></section>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>
