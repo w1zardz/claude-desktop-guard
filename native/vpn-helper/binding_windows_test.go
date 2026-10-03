@@ -16,11 +16,16 @@ func readInterfaceOption(raw syscall.RawConn) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return networkOrder(value), optionError
+	// Windows setsockopt requires network byte order, but getsockopt reports
+	// the interface index in host byte order. Swapping the readback again makes
+	// a bound loopback index of 1 appear as 16777216 in the native socket test.
+	return value, optionError
 }
 
 func TestWindowsInterfaceIndexUsesNetworkByteOrder(t *testing.T) {
-	if networkOrder(26) != 0x1a000000 || networkOrder(0x123456) != 0x56341200 {
-		t.Fatal("IP_UNICAST_IF index must be network byte order")
+	for index, expected := range map[int]int{1: 0x01000000, 26: 0x1a000000, 0x123456: 0x56341200} {
+		if actual := networkOrder(index); actual != expected {
+			t.Errorf("IP_UNICAST_IF write value for index %d: got %#x, want %#x", index, actual, expected)
+		}
 	}
 }
