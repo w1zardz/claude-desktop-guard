@@ -60,6 +60,15 @@ test('a lock during launch never returns a verified active state', async t=>{
   desktop.launchDesktop=async()=>{session.gate.lock();};
   await assert.rejects(session.start({profile}));assert.notEqual(session.phase,'active');assert.equal(session.gate,null);
 });
+test('successful startup clears an obsolete initialization lock reason', async t=>{
+  class StartupGate extends FakeGate {
+    async start() { this.emit('locked'); return super.start(); }
+  }
+  const {session}=await setup(t,{}, {Gate:StartupGate});
+  const state=await session.start({profile});
+  assert.equal(state.phase,'active'); assert.equal(state.gate.healthy,true);
+  assert.equal(state.reason,''); await session.stop();
+});
 test('running Desktop prevents both start and restore changes', async t=>{
   const {session,calls,desktop}=await setup(t);
   desktop.isDesktopRunning=async()=>true;

@@ -193,7 +193,7 @@ class GuardSession extends EventEmitter {
         this.profile = profile; await writePrivateJson(this.profileFile, profile);
         route.assertAlive();
         if (!gate.status().healthy) throw new Error('Выход перестал проходить проверку при запуске Claude.');
-        this.phase = 'active'; this.log('Claude запущен через локальный барьер. Проверка выхода повторяется каждые 10 секунд.');
+        this.phase = 'active'; this.reason = ''; this.log('Claude запущен через локальный барьер. Проверка выхода повторяется каждые 10 секунд.');
         return this.snapshot();
       } catch (e) {
         gate?.lock('Запуск остановлен.');
