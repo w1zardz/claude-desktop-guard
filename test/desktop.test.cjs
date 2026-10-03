@@ -52,8 +52,10 @@ test('new profile restores existing metadata entries and deletes only owned file
   assert.equal(meta.entries.length, 2);
   const configPath = path.join(f.library, `${meta.appliedId}.json`);
   assert.deepEqual(await jsonRead(configPath), { egressProxyUrl: PROXY });
-  assert.equal((await fs.stat(f.options.journalDir)).mode & 0o777, 0o700);
-  assert.equal((await fs.stat(configPath)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal((await fs.stat(f.options.journalDir)).mode & 0o777, 0o700);
+    assert.equal((await fs.stat(configPath)).mode & 0o777, 0o600);
+  }
   assert.equal((await desktop.restoreDesktopProxy(f.options.journalDir)).restored, true);
   assert.deepEqual(await fs.readFile(metaPath), bytes);
   await absent(configPath); await absent(f.settings);
