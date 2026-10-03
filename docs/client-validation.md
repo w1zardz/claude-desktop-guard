@@ -33,13 +33,13 @@ Run `npm run test:client`. A separate sandboxed Electron fixture uses the actual
 
 - Renderer, worker and child Node timezone are `Europe/Helsinki`.
 - Winter/summer offsets follow Finland's DST rules.
-- Chromium language/languages and the HTTP `Accept-Language` header match explicit `en-GB`.
+- Chromium primary language and the HTTP `Accept-Language` header match explicit `en-GB`. On macOS the entire language list is `["en-GB"]`; on Windows the test also confirms that native OS languages remain in that list.
 - On macOS, Cocoa preferred languages become `["en-GB"]` and native regional locale becomes `en-FI`.
 - Host environment remains unchanged. The `.invalid` page name is handled by the local fixture; no external service is contacted.
 
 The fixture runs in CI on macOS, Windows and Linux. A passing Windows fixture is evidence for the tested Electron runtime, **not** a live test of Claude Desktop on the user's Windows PC.
 
-Windows native preferred languages and regional APIs remain those of Windows. Chromium language and Node locale environment do not replace those APIs. Changing the system timezone while Claude runs can reset Chromium's Windows timezone; relaunch Claude through Guard afterward. A previously saved Desktop UI language can also override automatic UI language selection.
+Windows native preferred languages and regional APIs remain those of Windows. Electron also appends these native languages to `navigator.languages`: choosing a primary language does not conceal fallback OS languages. Chromium language and Node locale environment do not replace those APIs. Changing the system timezone while Claude runs can reset Chromium's Windows timezone; relaunch Claude through Guard afterward. A previously saved Desktop UI language can also override automatic UI language selection.
 
 ## Reproduce the actual application measurement
 

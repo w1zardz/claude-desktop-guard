@@ -76,7 +76,7 @@ function maskStatus() {
     const measured = applied.measured;
     $('client-mask-status').textContent = `Измерено внутри приложения: часовой пояс ${measured.timezone || '—'}, язык ${measured.language || '—'}, страна ${measured.region || '—'}.`;
   } else if (applied?.status === 'applied') $('client-mask-status').textContent = applied.nativeLocaleApplied === false
-    ? 'TZ и язык Chromium переданы. Предпочитаемые языки и регион ОС Windows сохранены. Автоматическая проверка значений внутри Claude не выполняется.'
+    ? 'TZ и язык Chromium переданы. Запасные языки и регион ОС Windows сохранены. Автоматическая проверка значений внутри Claude не выполняется.'
     : 'Параметры переданы; значения внутри Claude автоматически не измеряются.';
   else $('client-mask-status').textContent = enabled ? 'Ожидает запуска; значения внутри приложения не измерены.' : 'Выключено';
 }

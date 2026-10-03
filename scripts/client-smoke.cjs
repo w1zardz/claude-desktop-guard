@@ -46,11 +46,17 @@ const { buildLaunch } = require('../src/desktop.cjs');
     assert.equal(renderer.timezone, clientMask.timezone);
     assert.equal(renderer.workerTimezone, clientMask.timezone);
     assert.equal(renderer.language, clientMask.language);
-    assert.deepEqual(renderer.languages, [clientMask.language]);
+    assert.equal(renderer.languages[0], clientMask.language);
     assert.equal(renderer.winterOffset, -120); assert.equal(renderer.summerOffset, -180);
     assert.match(headers.language, /^en-GB(?:,|$)/);
     if (process.platform === 'darwin') {
+      assert.deepEqual(renderer.languages, [clientMask.language]);
       assert.deepEqual(main.preferredLanguages, [clientMask.language]); assert.equal(main.systemLocale, 'en-FI');
+    }
+    if (process.platform === 'win32') {
+      // Electron appends native OS languages to navigator.languages on Windows.
+      // Assert this remaining signal rather than claiming it was removed.
+      for (const language of main.preferredLanguages) assert.ok(renderer.languages.includes(language));
     }
     const child = JSON.parse(execFileSync(process.execPath, ['-e', 'console.log(JSON.stringify({timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,language:process.env.LANG}))'], { env: launch.env, encoding: 'utf8' }));
     assert.equal(child.timezone, clientMask.timezone); assert.equal(child.language, 'en_GB.UTF-8');

@@ -35,7 +35,7 @@ A desktop companion for **Claude Desktop's Code tab on macOS and Windows**. Sele
 
 [Validation results and reproducible checks](docs/client-validation.md) include actual Claude Desktop measurements on macOS and cross-platform Electron tests for renderer/worker timezone, DST, language headers, and child-process inheritance. Guard reports **parameters passed**, not a fictitious runtime measurement.
 
-On Windows, native preferred OS languages and regional APIs remain available to Claude even when Chromium language changes. A Windows OS timezone change can reset Chromium timezone until Claude is relaunched. Saved Desktop UI language can also differ from Chromium language. OS/platform, User-Agent, RAM/device class, GPU, fonts, Canvas/WebGL, TLS and account history are not hidden by this profile.
+On Windows, native preferred OS languages (also appended to `navigator.languages`) and regional APIs remain available to Claude even when Chromium language changes. A Windows OS timezone change can reset Chromium timezone until Claude is relaunched. Saved Desktop UI language can also differ from Chromium language. OS/platform, User-Agent, RAM/device class, GPU, fonts, Canvas/WebGL, TLS and account history are not hidden by this profile.
 
 ## Coverage and limits
 
