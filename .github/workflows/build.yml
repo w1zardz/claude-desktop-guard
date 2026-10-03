@@ -21,6 +21,13 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - run: npm run helper:build
+        if: runner.os != 'Linux'
+      - run: npm run test:helper
       - run: npm run check
       - run: npm test
       - run: npm run test:ui
@@ -51,9 +58,14 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.8'
+          cache: false
       - run: npm run dist -- --${{ matrix.target }} --${{ matrix.arch }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CDG_HELPER_ARCH: ${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-guard-${{ matrix.target }}-${{ matrix.arch }}
@@ -81,4 +93,4 @@ jobs:
         run: |
           cd release-assets
           sha256sum *.zip *.exe > SHA256SUMS.txt
-          gh release create "$RELEASE_TAG" --repo "$REPOSITORY" --title "Claude Desktop Guard $RELEASE_TAG" --notes "Windows x64 and macOS Apple Silicon / Intel. Local proxy gate, exit pinning and reversible Desktop settings. Unsigned / not notarized; account suspension prevention is not guaranteed." *.zip *.exe SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" --repo "$REPOSITORY" --title "Claude Desktop Guard $RELEASE_TAG" --notes "Windows x64 and macOS Apple Silicon / Intel. Amnezia VPN mode binds IPv4 sockets and encrypted DNS to your selected tunnel; local HTTP proxy mode remains available. Exit pinning and reversible Desktop settings. Unsigned / not notarized; account suspension prevention is not guaranteed." *.zip *.exe SHA256SUMS.txt

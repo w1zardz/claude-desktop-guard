@@ -3,21 +3,24 @@ const { EventEmitter } = require('node:events');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const os = require('node:os');
+const net = require('node:net');
 const { GuardGate, probeExit } = require('./network.cjs');
 const desktopApi = require('./desktop.cjs');
-const { validateProfile, writePrivateJson, readProfile } = require('./profile.cjs');
+const { validateProfile, validateVpnInterface, routingIdentity, writePrivateJson, readProfile } = require('./profile.cjs');
 const { verifyBinding } = require('./mihomo.cjs');
 
 class GuardSession extends EventEmitter {
-  constructor({ dataDir, desktop = desktopApi, Gate = GuardGate, probe = probeExit, binding = verifyBinding } = {}) {
+  constructor({ dataDir, desktop = desktopApi, Gate = GuardGate, probe = probeExit, binding = verifyBinding, amnezia } = {}) {
     super();
     this.dataDir = dataDir; this.desktopApi = desktop; this.Gate = Gate;
     this.probeExit = probe; this.binding = binding;
+    this.amnezia = amnezia || { listInterfaces: () => require('./amnezia.cjs').listInterfaces(), openAmnezia: selected => require('./amnezia.cjs').openAmnezia(selected) };
     this.profileFile = path.join(dataDir, 'profile.json');
     this.journalDir = path.join(dataDir, 'desktop-transaction');
     this.profile = null; this.desktop = null; this.gate = null;
     this.busy = false; this.phase = 'idle'; this.reason = ''; this.history = [];
     this.pendingProbe = null; this.findings = []; this.transaction = false;
+    this.vpnInterfaces = []; this.interfacesError = ''; this.routing = null; this.routes = new Set(); this.openings = new Set(); this.shuttingDown = false;
   }
   log(message) {
     this.history.unshift({ time: new Date().toISOString(), message });
@@ -28,6 +31,7 @@ class GuardSession extends EventEmitter {
       reason: this.reason, busy: this.busy, probe: this.pendingProbe,
       gate: this.gate?.status() || null, transaction: this.transaction,
       findings: this.findings, history: this.history,
+      vpnInterfaces: this.vpnInterfaces, interfacesError: this.interfacesError,
       environment: { platform: process.platform, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: Intl.DateTimeFormat().resolvedOptions().locale },
     };
   }
@@ -39,6 +43,11 @@ class GuardSession extends EventEmitter {
     this.profile = await readProfile(this.profileFile);
     this.desktop = await this.desktopApi.discoverDesktop();
     this.findings = await this.desktopApi.readDesktopAudit();
+    try { await this.refreshInterfaces(); }
+    catch {
+      this.interfacesError = 'VPN-интерфейсы недоступны. Запустите Amnezia и обновите список.';
+      this.findings.push({ code: 'AMNEZIA_INTERFACES', severity: 'warning', message: this.interfacesError });
+    }
     this.transaction = await this.transactionPending();
     if (this.transaction) this.log('Сохранена транзакция настроек. Восстановите её перед следующим запуском.');
     return this.snapshot();
@@ -53,11 +62,68 @@ class GuardSession extends EventEmitter {
     } catch (e) { if (e.code === 'ENOENT') return false; throw e; }
   }
   async exclusive(operation) {
+    if (this.shuttingDown) throw new Error('Guard завершает работу.');
     if (this.busy) throw new Error('Дождитесь завершения текущего действия.');
     this.busy = true; this.emit('change', this.snapshot());
     try { return await operation(); }
     catch (e) { this.reason = e.message; this.log(e.message); throw e; }
     finally { this.busy = false; this.emit('change', this.snapshot()); }
+  }
+  async refreshInterfaces() {
+    const items = await this.amnezia.listInterfaces();
+    if (!Array.isArray(items)) throw new Error('Не удалось получить список VPN-интерфейсов.');
+    const interfaces = items.map(validateVpnInterface);
+    if (new Set(interfaces.map(item => JSON.stringify(item))).size !== interfaces.length) throw new Error('Список VPN-интерфейсов содержит дубли.');
+    this.vpnInterfaces = interfaces; this.interfacesError = '';
+    return interfaces;
+  }
+  async interfaces() {
+    return this.exclusive(async () => {
+      try { await this.refreshInterfaces(); }
+      catch (error) { this.vpnInterfaces = []; this.interfacesError = 'VPN-интерфейсы недоступны. Запустите Amnezia и обновите список.'; throw error; }
+      this.emit('change', this.snapshot()); return this.snapshot();
+    });
+  }
+  async openRouting(profile, persistent = false) {
+    if (profile.mode !== 'amnezia') return { proxyUrl: profile.proxyUrl, assertAlive: () => { if (this.shuttingDown) throw new Error('Guard завершает работу.'); }, async close() {} };
+    const opening = this.openNativeRouting(profile, persistent);
+    this.openings.add(opening);
+    try { return await opening; } finally { this.openings.delete(opening); }
+  }
+  async openNativeRouting(profile, persistent) {
+    const available = await this.refreshInterfaces();
+    const selected = profile.vpnInterface;
+    if (!available.some(item => item.name === selected.name && item.index === selected.index && item.address === selected.address)) {
+      throw new Error('Выбранный VPN-интерфейс исчез или изменился. Обновите список и явно выберите его заново.');
+    }
+    if (this.shuttingDown) throw new Error('Guard завершает работу.');
+    const helper = await this.amnezia.openAmnezia(selected);
+    let closed = false, dead = false;
+    const route = {
+      proxyUrl: helper.proxyUrl,
+      assertAlive: () => { if (closed || dead || helper.alive === false || this.shuttingDown) throw new Error('Amnezia-помощник остановлен. Прямой маршрут запрещён.'); },
+      close: async () => { if (closed) return; closed = true; try { await helper.close(); } finally { this.routes.delete(route); if (this.routing === route) this.routing = null; } },
+    };
+    const died = () => {
+      if (closed) return;
+      dead = true;
+      if (persistent && this.gate) this.gate.lock('Amnezia-помощник остановлен. Прямой маршрут запрещён.');
+    };
+    // Subscribe immediately after ready and inspect the provider's durable alive flag.
+    // A helper that died before these listeners were installed must never unlock the gate.
+    helper.on('exit', died); helper.on('error', died);
+    this.routes.add(route);
+    if (persistent) this.routing = route;
+    try { route.assertAlive(); return route; } catch (error) { await route.close(); throw error; }
+  }
+  async checkRouting(profile, route, secret) {
+    route.assertAlive();
+    const bound = profile.mode === 'proxy' ? await this.binding(profile.mihomo, secret) : { enabled: false };
+    route.assertAlive();
+    const exit = await this.probeExit(route.proxyUrl);
+    route.assertAlive();
+    if (profile.mode === 'amnezia' && net.isIP(exit.ip) !== 4) throw new Error('Режим Amnezia поддерживает только IPv4. Проверка IPv6 отклонена.');
+    return { ...exit, binding: bound };
   }
   async probe(input) {
     return this.exclusive(async () => {
@@ -65,13 +131,15 @@ class GuardSession extends EventEmitter {
       const profile = validateProfile(input?.profile);
       const secret = this.secret(input?.controllerSecret);
       this.phase = 'checking'; this.reason = ''; this.pendingProbe = null;
+      let route;
       try {
-        const bound = await this.binding(profile.mihomo, secret);
-        const exit = await this.probeExit(profile.proxyUrl);
-        this.pendingProbe = { ...exit, proxyUrl: profile.proxyUrl, binding: bound };
-        this.phase = 'idle'; this.log('Выход проверен через выбранный прокси. IP ещё не закреплён.');
+        route = await this.openRouting(profile);
+        const exit = await this.checkRouting(profile, route, secret);
+        this.pendingProbe = { ...exit, routingIdentity: routingIdentity(profile), ...(profile.mode === 'proxy' ? { proxyUrl: profile.proxyUrl } : {}) };
+        this.phase = 'idle'; this.log('Выход проверен через выбранный маршрут. IP ещё не закреплён.');
         return this.snapshot();
       } catch (e) { this.phase = 'idle'; throw e; }
+      finally { await route?.close(); }
     });
   }
   secret(value) {
@@ -85,8 +153,10 @@ class GuardSession extends EventEmitter {
       const profile = validateProfile(input?.profile);
       const sample = this.pendingProbe;
       const observedAt = new Date(sample?.observedAt).getTime();
-      if (!sample || sample.proxyUrl !== profile.proxyUrl || !Number.isFinite(observedAt) || observedAt > Date.now() || Date.now() - observedAt > 120000) throw new Error('Сначала снова проверьте этот выход.');
+      const identity = routingIdentity(profile);
+      if (!sample || sample.routingIdentity !== identity || !Number.isFinite(observedAt) || observedAt > Date.now() || Date.now() - observedAt > 120000) throw new Error('Сначала снова проверьте этот маршрут, интерфейс и выбранный узел.');
       profile.expectedIp = sample.ip; profile.expectedCountry = sample.country;
+      profile.pinIdentity = identity;
       this.profile = validateProfile(profile, { requirePin: true });
       await writePrivateJson(this.profileFile, this.profile);
       this.log('IP и страна закреплены вашим выбором. Секрет контроллера не сохраняется.');
@@ -103,27 +173,32 @@ class GuardSession extends EventEmitter {
       if (!this.desktop) throw new Error('Claude Desktop не найден. Установите официальное приложение.');
       if (!desktopApi.versionSupported(this.desktop.version)) throw new Error(`Обновите Claude Desktop до ${desktopApi.MIN_VERSION} или новее.`);
       this.phase = 'starting'; this.reason = '';
-      const check = async () => {
-        await this.binding(profile.mihomo, secret);
-        return this.probeExit(profile.proxyUrl);
-      };
-      const gate = new this.Gate({ proxyUrl: profile.proxyUrl, expectedIp: profile.expectedIp,
-        expectedCountry: profile.expectedCountry, probe: check });
-      this.gate = gate;
-      gate.on('status', () => this.emit('change', this.snapshot()));
-      gate.on('locked', () => { this.phase = 'locked'; this.reason = gate.status().reason; this.log('Барьер заблокирован. Действующие и новые туннели закрыты.'); });
+      let route, gate;
       try {
+        route = await this.openRouting(profile, true);
+        const check = () => this.checkRouting(profile, route, secret);
+        gate = new this.Gate({ proxyUrl: route.proxyUrl, expectedIp: profile.expectedIp,
+          expectedCountry: profile.expectedCountry, probe: check });
+        this.gate = gate;
+        gate.on('status', () => this.emit('change', this.snapshot()));
+        gate.on('locked', () => { this.phase = 'locked'; this.reason = gate.status().reason; this.log('Барьер заблокирован. Действующие и новые туннели закрыты.'); });
+        route.assertAlive();
         const proxyUrl = await gate.start();
+        route.assertAlive();
         await this.desktopApi.installDesktopProxy({ proxyUrl, journalDir: this.journalDir });
         this.transaction = true;
+        route.assertAlive();
         if (!gate.status().healthy) throw new Error('Выход перестал проходить проверку до запуска Claude.');
         await this.desktopApi.launchDesktop({ desktop: this.desktop, proxyUrl, strictMac: profile.strictMac });
         this.profile = profile; await writePrivateJson(this.profileFile, profile);
+        route.assertAlive();
         if (!gate.status().healthy) throw new Error('Выход перестал проходить проверку при запуске Claude.');
         this.phase = 'active'; this.log('Claude запущен через локальный барьер. Проверка выхода повторяется каждые 10 секунд.');
         return this.snapshot();
       } catch (e) {
-        await gate.stop(); this.gate = null; this.phase = 'idle';
+        gate?.lock('Запуск остановлен.');
+        await Promise.allSettled([gate?.stop(), route?.close()]);
+        this.gate = null; this.phase = 'idle';
         // An interrupted install may have written only part of its durable journal.
         this.transaction = await this.transactionPending();
         throw e;
@@ -132,11 +207,22 @@ class GuardSession extends EventEmitter {
   }
   async stop() {
     return this.exclusive(async () => {
-      if (this.gate) await this.gate.stop();
+      this.gate?.lock('Барьер остановлен.');
+      const cleanup = await Promise.allSettled([this.gate?.stop(), this.routing?.close()]);
       this.gate = null; this.phase = 'idle';
+      if (cleanup.some(result => result.status === 'rejected')) throw new Error('Ошибка остановки. Барьер заблокирован; прежние настройки сохранены в журнале.');
       this.log('Барьер остановлен. Настройки Claude остаются закреплены на закрытом прокси до явного восстановления.');
       return this.snapshot();
     });
+  }
+  async shutdown() {
+    this.shuttingDown = true;
+    this.gate?.lock('Приложение Guard закрывается.');
+    // A pending ready handshake may create a helper after quit was requested.
+    // Let its route observe shuttingDown and close before Electron exits.
+    await Promise.allSettled([...this.openings]);
+    await Promise.allSettled([this.gate?.stop(), ...[...this.routes].map(route => route.close())]);
+    this.gate = null; this.routing = null;
   }
   async restore() {
     return this.exclusive(async () => {

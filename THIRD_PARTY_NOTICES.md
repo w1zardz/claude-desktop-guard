@@ -10,4 +10,6 @@ This project independently implements a desktop proxy gate and configuration tra
 
 Electron is provided under its own license and Chromium/Node.js notices, included by the application packager. Build dependency licenses remain available in their published packages and lockfile. Product names identify compatibility and do not imply affiliation or endorsement.
 
+The native VPN helper is an independent implementation built with Go. The Go runtime and standard-library license is distributed as `GO-LICENSE` in application resources and preserved in [native/GO-LICENSE](native/GO-LICENSE). Cloudflare DNS-over-HTTPS is a network service used through the selected VPN interface; it is not bundled source code.
+
 Local TLS private keys in network tests are disposable public fixtures for an ephemeral test server, not operational credentials.

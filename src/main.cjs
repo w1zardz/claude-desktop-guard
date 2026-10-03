@@ -4,7 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { GuardSession } = require('./session.cjs');
 
-let window; let session; let tray; let quitting = false;
+let window; let session; let tray; let quitting = false; let shutdownPending = false; let shutdownDone = false;
 const smoke = process.argv.includes('--smoke-test');
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
@@ -25,13 +25,13 @@ else {
     const allowedSender = event => {
       if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('Недопустимый источник команды.');
     };
-    for (const [command, action] of Object.entries({ snapshot: () => session.snapshot(),
+    for (const [command, action] of Object.entries({ snapshot: () => session.snapshot(), interfaces: () => session.interfaces(),
       probe: input => session.probe(input), pin: input => session.pin(input),
       start: input => session.start(input), stop: () => session.stop(), restore: () => session.restore(),
     })) {
       ipcMain.handle(`guard:${command}`, async (event, input) => {
         allowedSender(event);
-        if (smoke && !['snapshot', 'probe', 'pin'].includes(command)) throw new Error('Настройки Desktop не меняются в режиме проверки интерфейса.');
+        if (smoke && !['snapshot', 'interfaces', 'probe', 'pin'].includes(command)) throw new Error('Настройки Desktop не меняются в режиме проверки интерфейса.');
         return action(input);
       });
     }
@@ -60,4 +60,11 @@ else {
   }).catch(error => { dialog.showErrorBox('Guard не запущен', error.message); app.quit(); });
 }
 app.on('window-all-closed', () => { if (!session?.gate) { quitting = true; app.quit(); } });
-app.on('before-quit', () => { quitting = true; session?.gate?.lock('Приложение Guard закрывается.'); });
+app.on('before-quit', event => {
+  quitting = true;
+  if (!session || shutdownDone) return;
+  event.preventDefault();
+  if (shutdownPending) return;
+  shutdownPending = true;
+  session.shutdown().finally(() => { shutdownDone = true; app.quit(); });
+});
