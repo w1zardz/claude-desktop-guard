@@ -7,3 +7,5 @@ The gate is not a system firewall. Other local programs, privileged services, th
 Sensitive settings may exist in the transaction journal because restoring them requires keeping their original values. The application uses private file modes on POSIX; Windows additionally relies on the user's profile-directory ACLs. Avoid sharing this journal, screenshots of personal exit addresses, or controller secrets in a public issue.
 
 Use GitHub's private vulnerability reporting for security findings if available. Public issues should include only a minimal sanitized reproduction. Never attach account tokens or a real configuration backup.
+
+Client environment profiles use validated timezone/language/region strings in a shell-free child launch. macOS Cocoa overrides exist only in the child process argument domain. No debugger listener, vendor code patch, interception certificate, random hardware fingerprint, or account-data access is introduced. UI status means launch parameters were passed; a measurement from another Electron process is not presented as a measurement from Claude. Native Windows OS language preferences and other hardware/account signals remain visible.

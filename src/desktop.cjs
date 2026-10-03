@@ -383,10 +383,12 @@ async function restoreDesktopProxy(journalDir) {
   } finally { await release(); }
 }
 
-function buildLaunch({ desktop, proxyUrl, timezone, language, strictMac = false, env = process.env } = {}) {
+function buildLaunch({ desktop, proxyUrl, timezone, language, clientMask, strictMac = false, env = process.env } = {}) {
   if (!object(desktop) || !['darwin', 'win32'].includes(desktop.platform) || typeof desktop.path !== 'string' || !path.isAbsolute(desktop.path)) fail('INVALID_DESKTOP', 'A verified Desktop executable is required.');
   if (!versionSupported(desktop.version)) fail('DESKTOP_VERSION', `Proxy pinning requires Desktop ${MIN_VERSION} or later.`);
   const proxy = validateProxy(proxyUrl);
+  const mask = require('./profile.cjs').validateClientMask(clientMask);
+  if (mask.enabled) { timezone = mask.timezone; language = mask.language; }
   const launchEnv = { ...env };
   for (const key of Object.keys(launchEnv)) if (/^(http_proxy|https_proxy|all_proxy|no_proxy)$/i.test(key)) delete launchEnv[key];
   for (const key of PROXY_KEYS) launchEnv[key] = proxy;
@@ -397,8 +399,16 @@ function buildLaunch({ desktop, proxyUrl, timezone, language, strictMac = false,
   }
   const args = [`--proxy-server=${proxy}`, '--proxy-bypass-list=<-loopback>', '--disable-quic'];
   if (language) {
-    if (typeof language !== 'string' || !/^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/.test(language)) fail('INVALID_LANGUAGE', 'Choose a valid language tag.');
+    try { language = require('./profile.cjs').validateClientMask({ language }).language; }
+    catch { fail('INVALID_LANGUAGE', 'Choose a valid language tag.'); }
     args.push(`--lang=${language}`); launchEnv.LANG = `${language.replace(/-/g, '_')}.UTF-8`;
+    launchEnv.LC_ALL = launchEnv.LANG;
+  }
+  if (mask.enabled && desktop.platform === 'darwin') {
+    // Cocoa reads these command-line defaults for this process only. They cover
+    // native preferred languages/region, which --lang does not replace on macOS.
+    const locale = new Intl.Locale(mask.language, { region: mask.region }).baseName.replace(/-/g, '_');
+    args.push('-AppleLanguages', `(${mask.language})`, '-AppleLocale', locale);
   }
   if (strictMac) {
     if (desktop.platform !== 'darwin') fail('UNSUPPORTED_STRICT_MODE', 'Process sandbox launch is available only on macOS.');

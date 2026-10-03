@@ -19,7 +19,7 @@ class GuardSession extends EventEmitter {
     this.journalDir = path.join(dataDir, 'desktop-transaction');
     this.profile = null; this.desktop = null; this.gate = null;
     this.busy = false; this.phase = 'idle'; this.reason = ''; this.history = [];
-    this.pendingProbe = null; this.findings = []; this.transaction = false;
+    this.pendingProbe = null; this.findings = []; this.transaction = false; this.clientMask = null;
     this.vpnInterfaces = []; this.interfacesError = ''; this.routing = null; this.routes = new Set(); this.openings = new Set(); this.shuttingDown = false;
   }
   log(message) {
@@ -30,7 +30,7 @@ class GuardSession extends EventEmitter {
     return { profile: this.profile, desktop: this.desktop, phase: this.phase,
       reason: this.reason, busy: this.busy, probe: this.pendingProbe,
       gate: this.gate?.status() || null, transaction: this.transaction,
-      findings: this.findings, history: this.history,
+      findings: this.findings, history: this.history, clientMask: this.clientMask,
       vpnInterfaces: this.vpnInterfaces, interfacesError: this.interfacesError,
       environment: { platform: process.platform, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: Intl.DateTimeFormat().resolvedOptions().locale },
     };
@@ -128,7 +128,9 @@ class GuardSession extends EventEmitter {
   async probe(input) {
     return this.exclusive(async () => {
       if (this.gate) throw new Error('Сначала остановите текущий барьер.');
-      const profile = validateProfile(input?.profile);
+      // Exit probing needs only routing fields; an unfinished client profile
+      // must not prevent the check that supplies its timezone and region.
+      const profile = validateProfile({ ...input?.profile, clientMask: undefined });
       const secret = this.secret(input?.controllerSecret);
       this.phase = 'checking'; this.reason = ''; this.pendingProbe = null;
       let route;
@@ -173,10 +175,19 @@ class GuardSession extends EventEmitter {
       if (!this.desktop) throw new Error('Claude Desktop не найден. Установите официальное приложение.');
       if (!desktopApi.versionSupported(this.desktop.version)) throw new Error(`Обновите Claude Desktop до ${desktopApi.MIN_VERSION} или новее.`);
       this.phase = 'starting'; this.reason = '';
+      this.clientMask = null;
       let route, gate;
       try {
         route = await this.openRouting(profile, true);
-        const check = () => this.checkRouting(profile, route, secret);
+        const check = async () => {
+          const exit = await this.checkRouting(profile, route, secret);
+          if (profile.clientMask.enabled) {
+            let zone;
+            try { zone = new Intl.DateTimeFormat('en', { timeZone: exit.timezone }).resolvedOptions().timeZone; } catch {}
+            if (!exit.timezone || zone !== profile.clientMask.timezone) throw new Error('Часовой пояс профиля не совпадает с проверенным выходом. Выберите пояс выхода явно.');
+          }
+          return exit;
+        };
         gate = new this.Gate({ proxyUrl: route.proxyUrl, expectedIp: profile.expectedIp,
           expectedCountry: profile.expectedCountry, probe: check });
         this.gate = gate;
@@ -189,7 +200,13 @@ class GuardSession extends EventEmitter {
         this.transaction = true;
         route.assertAlive();
         if (!gate.status().healthy) throw new Error('Выход перестал проходить проверку до запуска Claude.');
-        await this.desktopApi.launchDesktop({ desktop: this.desktop, proxyUrl, strictMac: profile.strictMac });
+        await this.desktopApi.launchDesktop({ desktop: this.desktop, proxyUrl, clientMask: profile.clientMask, strictMac: profile.strictMac });
+        if (profile.clientMask.enabled) {
+          const { timezone, language, region } = profile.clientMask;
+          this.clientMask = { requested: { timezone, language, region }, status: 'applied', measured: null,
+            nativeLocaleApplied: this.desktop.platform === 'darwin' };
+          this.log('Параметры часового пояса и языка переданы Claude при запуске. Это не измерение значений внутри Claude.');
+        }
         this.profile = profile; await writePrivateJson(this.profileFile, profile);
         route.assertAlive();
         if (!gate.status().healthy) throw new Error('Выход перестал проходить проверку при запуске Claude.');
@@ -198,7 +215,7 @@ class GuardSession extends EventEmitter {
       } catch (e) {
         gate?.lock('Запуск остановлен.');
         await Promise.allSettled([gate?.stop(), route?.close()]);
-        this.gate = null; this.phase = 'idle';
+        this.gate = null; this.phase = 'idle'; this.clientMask = null;
         // An interrupted install may have written only part of its durable journal.
         this.transaction = await this.transactionPending();
         throw e;
@@ -209,7 +226,7 @@ class GuardSession extends EventEmitter {
     return this.exclusive(async () => {
       this.gate?.lock('Барьер остановлен.');
       const cleanup = await Promise.allSettled([this.gate?.stop(), this.routing?.close()]);
-      this.gate = null; this.phase = 'idle';
+      this.gate = null; this.phase = 'idle'; this.clientMask = null;
       if (cleanup.some(result => result.status === 'rejected')) throw new Error('Ошибка остановки. Барьер заблокирован; прежние настройки сохранены в журнале.');
       this.log('Барьер остановлен. Настройки Claude остаются закреплены на закрытом прокси до явного восстановления.');
       return this.snapshot();

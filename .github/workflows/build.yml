@@ -30,6 +30,10 @@ jobs:
       - run: npm run test:helper
       - run: npm run check
       - run: npm test
+      - run: npm run test:client
+        if: runner.os != 'Linux'
+      - run: xvfb-run -a npm run test:client
+        if: runner.os == 'Linux'
       - run: npm run test:ui
         if: runner.os != 'Linux'
       - run: xvfb-run -a npm run test:ui
@@ -93,4 +97,4 @@ jobs:
         run: |
           cd release-assets
           sha256sum *.zip *.exe > SHA256SUMS.txt
-          gh release create "$RELEASE_TAG" --repo "$REPOSITORY" --title "Claude Desktop Guard $RELEASE_TAG" --notes "Windows x64 and macOS Apple Silicon / Intel. Amnezia VPN mode binds IPv4 sockets and encrypted DNS to your selected tunnel; local HTTP proxy mode remains available. Exit pinning and reversible Desktop settings. Unsigned / not notarized; account suspension prevention is not guaranteed." *.zip *.exe SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" --repo "$REPOSITORY" --title "Claude Desktop Guard $RELEASE_TAG" --notes "Windows x64 and macOS Apple Silicon / Intel. Amnezia VPN mode binds IPv4 sockets and encrypted DNS to your selected tunnel; local HTTP proxy mode remains available. Process-scoped timezone and Chromium language profiles; native language/region overrides on macOS. Exit pinning and reversible Desktop settings. Full device fingerprint masking is not provided. Unsigned / not notarized; account suspension prevention is not guaranteed." *.zip *.exe SHA256SUMS.txt

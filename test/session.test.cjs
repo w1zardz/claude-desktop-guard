@@ -32,6 +32,11 @@ async function setup(t, overrides={}, dependencies={}) {
   const session=new GuardSession({dataDir:dir,desktop,Gate:FakeGate,probe:async()=>sample(),binding:async()=>({enabled:false}), amnezia: { listInterfaces: async () => [], openAmnezia: async () => { throw new Error('No interface selected'); } }, ...dependencies});
   await session.init(); return {session,calls,dir,desktop};
 }
+test('exit check accepts an unfinished client draft without applying it', async t => {
+  const { session, calls } = await setup(t);
+  const state = await session.probe({ profile: { ...profile, clientMask: { enabled: true, timezone: '', language: '', region: '' } } });
+  assert.equal(state.probe.ip, '8.8.8.8'); assert.equal(state.clientMask, null); assert.deepEqual(calls, []);
+});
 test('pin rejects stale ISO dates, future dates and invalid timestamps', async t=>{
   const {session}=await setup(t);
   for(const observedAt of ['2000-01-01T00:00:00.000Z',new Date(Date.now()+60000).toISOString(),'invalid']) {
@@ -69,6 +74,27 @@ test('successful startup clears an obsolete initialization lock reason', async t
   assert.equal(state.phase,'active'); assert.equal(state.gate.healthy,true);
   assert.equal(state.reason,''); await session.stop();
 });
+test('client mask reaches launcher and status does not claim runtime measurement', async t => {
+  let options;
+  const { session } = await setup(t, { launchDesktop: async value => { options = value; } });
+  const clientMask = { enabled: true, timezone: 'Etc/UTC', language: 'en-US', region: 'US' };
+  const state = await session.start({ profile: { ...profile, clientMask } });
+  assert.equal(options.clientMask.timezone, 'UTC'); assert.equal(options.clientMask.language, 'en-US');
+  assert.deepEqual(state.clientMask, { requested: { timezone: 'UTC', language: 'en-US', region: 'US' }, status: 'applied', measured: null, nativeLocaleApplied: true });
+  await session.stop(); assert.equal(session.snapshot().clientMask, null);
+});
+test('timezone mismatch or missing GeoIP timezone stops before settings and launch', async t => {
+  for (const timezone of ['Europe/Moscow', null]) {
+    class WrongZone extends FakeGate {
+      async start() { await this.options.probe(); return super.start(); }
+    }
+    const { session, calls } = await setup(t, {}, { Gate: WrongZone, probe: async () => ({ ...sample(), timezone }) });
+    const clientMask = { enabled: true, timezone: 'Europe/Helsinki', language: 'en-US', region: 'US' };
+    await assert.rejects(session.start({ profile: { ...profile, clientMask } }), /Часовой пояс/);
+    assert.deepEqual(calls, []); assert.equal(session.gate, null);
+  }
+});
+
 test('running Desktop prevents both start and restore changes', async t=>{
   const {session,calls,desktop}=await setup(t);
   desktop.isDesktopRunning=async()=>true;

@@ -204,6 +204,27 @@ test('launch arguments and env are isolated, validated and shell-free', () => {
   assert.throws(() => desktop.buildLaunch({ desktop: { ...descriptor, version: '1.44121.0' }, proxyUrl: PROXY }), { code: 'DESKTOP_VERSION' });
 });
 
+test('client mask uses only child environment and scoped Cocoa defaults', () => {
+  const descriptor = { path: path.resolve('Claude'), version: '2.19675.0', platform: 'darwin' };
+  const env = { TZ: 'Europe/Moscow', LANG: 'ru_RU.UTF-8', LC_ALL: 'ru_RU.UTF-8' };
+  const clientMask = { enabled: true, timezone: 'Europe/Helsinki', language: 'en-US', region: 'FI' };
+  const launch = desktop.buildLaunch({ desktop: descriptor, proxyUrl: PROXY, clientMask, env });
+  assert.deepEqual(env, { TZ: 'Europe/Moscow', LANG: 'ru_RU.UTF-8', LC_ALL: 'ru_RU.UTF-8' });
+  assert.equal(launch.env.TZ, 'Europe/Helsinki');
+  assert.equal(launch.env.LANG, 'en_US.UTF-8'); assert.equal(launch.env.LC_ALL, 'en_US.UTF-8');
+  assert.deepEqual(launch.args.slice(-5), ['--lang=en-US', '-AppleLanguages', '(en-US)', '-AppleLocale', 'en_FI']);
+  assert.ok(!launch.args.some(arg => /remote-debugging|inspect/.test(arg)));
+  const windows = desktop.buildLaunch({ desktop: { ...descriptor, platform: 'win32' }, proxyUrl: PROXY, clientMask, env });
+  assert.equal(windows.env.TZ, 'Europe/Helsinki'); assert.ok(windows.args.includes('--lang=en-US'));
+  assert.ok(!windows.args.some(arg => arg.startsWith('-Apple')));
+  for (const language of ['en-US-u-ca-gregory', 'en-US-x-test', 'de-CH-u-co-phonebk', 'sr-Latn-RS']) {
+    const extended = desktop.buildLaunch({ desktop: descriptor, proxyUrl: PROXY, clientMask: { ...clientMask, language }, env });
+    assert.ok(extended.args.includes(`--lang=${Intl.getCanonicalLocales(language)[0]}`));
+  }
+  const disabled = desktop.buildLaunch({ desktop: descriptor, proxyUrl: PROXY, env });
+  assert.equal(disabled.env.TZ, env.TZ); assert.ok(!disabled.args.some(arg => arg.startsWith('--lang') || arg.startsWith('-Apple')));
+});
+
 test('Windows app package executable must remain inside package root', async t => {
   const f = await fixture(t);
   const root = path.join(f.base, 'package'), executable = path.join(root, 'app', 'Claude.exe');

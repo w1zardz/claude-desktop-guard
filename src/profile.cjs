@@ -5,6 +5,34 @@ const net = require('node:net');
 const crypto = require('node:crypto');
 const { validateProxyUrl } = require('./network.cjs');
 
+function validateClientMask(value) {
+  if (value === undefined) return { enabled: false, timezone: '', language: '', region: '' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Некорректные параметры часового пояса и языка Claude.');
+  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') throw new Error('Включение параметров Claude должно быть явным boolean.');
+  const enabled = value.enabled === true;
+  const fields = {};
+  for (const name of ['timezone', 'language', 'region']) {
+    if (value[name] !== undefined && typeof value[name] !== 'string') throw new Error(`Параметр ${name} должен быть строкой.`);
+    fields[name] = (value[name] || '').trim();
+  }
+  if (enabled && Object.values(fields).some(field => !field)) throw new Error('Укажите часовой пояс, язык и страну Claude явно.');
+  if (fields.timezone) {
+    if (!/^[A-Za-z0-9_+./-]{1,100}$/.test(fields.timezone)) throw new Error('Укажите корректный IANA-часовой пояс Claude.');
+    try { fields.timezone = new Intl.DateTimeFormat('en', { timeZone: fields.timezone }).resolvedOptions().timeZone; }
+    catch { throw new Error('Укажите корректный IANA-часовой пояс Claude.'); }
+  }
+  if (fields.language) {
+    if (fields.language.length > 100 || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(fields.language)) throw new Error('Укажите корректный BCP47-код языка Claude.');
+    try { fields.language = Intl.getCanonicalLocales(fields.language)[0]; }
+    catch { throw new Error('Укажите корректный BCP47-код языка Claude.'); }
+  }
+  if (fields.region) {
+    fields.region = fields.region.toUpperCase();
+    if (!/^[A-Z]{2}$/.test(fields.region)) throw new Error('Страна Claude должна иметь явный двухбуквенный код ISO.');
+  }
+  return { enabled, ...fields };
+}
+
 function validateVpnInterface(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.name !== 'string' ||
       !value.name.trim() || value.name.length > 256 || /[\u0000-\u001f\u007f]/.test(value.name) ||
@@ -34,6 +62,8 @@ function validateProfile(value, { requirePin = false } = {}) {
   if (mode === 'amnezia' && expectedIp && net.isIP(expectedIp) !== 4) throw new Error('Режим Amnezia поддерживает только IPv4. IPv6-маршрут запрещён.');
   if (expectedCountry && !/^[A-Z]{2}$/.test(expectedCountry)) throw new Error('Страна должна иметь двухбуквенный код.');
   if (requirePin && (!expectedIp || !expectedCountry)) throw new Error('Сначала проверьте выход и явно закрепите IP и страну.');
+  const clientMask = validateClientMask(value.clientMask);
+  if (requirePin && clientMask.enabled && clientMask.region !== expectedCountry) throw new Error('Страна параметров Claude должна совпадать со страной закреплённого выхода.');
   const mihomo = value.mihomo || {};
   const controllerUrl = String(mihomo.controllerUrl || '').trim();
   const selector = String(mihomo.selector || '').trim();
@@ -43,7 +73,7 @@ function validateProfile(value, { requirePin = false } = {}) {
     throw new Error('Для привязки Mihomo нужны адрес контроллера, группа и выбранный узел.');
   }
   if (selector.length > 256 || expectedLeaf.length > 256) throw new Error('Имя узла слишком длинное.');
-  const profile = { mode, ...(mode === 'proxy' ? { proxyUrl } : { vpnInterface }), expectedIp, expectedCountry, strictMac: value.strictMac === true,
+  const profile = { mode, ...(mode === 'proxy' ? { proxyUrl } : { vpnInterface }), expectedIp, expectedCountry, strictMac: value.strictMac === true, clientMask,
     mihomo: { controllerUrl: controllerUrl ? validateProxyUrl(controllerUrl) : '', selector, expectedLeaf } };
   if (value.pinIdentity !== undefined) {
     if (typeof value.pinIdentity !== 'string' || value.pinIdentity.length > 2048) throw new Error('Некорректная привязка проверенного маршрута.');
@@ -73,4 +103,4 @@ async function readProfile(file) {
     return validateProfile(JSON.parse(await fs.readFile(file, 'utf8')));
   } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 }
-module.exports = { validateProfile, validateVpnInterface, routingIdentity, readProfile, writePrivateJson };
+module.exports = { validateProfile, validateClientMask, validateVpnInterface, routingIdentity, readProfile, writePrivateJson };

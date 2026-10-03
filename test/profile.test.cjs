@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs/promises');
-const { validateProfile, routingIdentity, writePrivateJson, readProfile } = require('../src/profile.cjs');
+const { validateProfile, validateClientMask, routingIdentity, writePrivateJson, readProfile } = require('../src/profile.cjs');
 const { verifyBinding } = require('../src/mihomo.cjs');
 
 test('profile requires an explicit proxy, pin and complete optional Mihomo binding', () => {
@@ -39,6 +39,47 @@ test('saved pins bind to mode, proxy, interface source and Mihomo selection', ()
     assert.throws(() => validateProfile({ ...vpn, vpnInterface: { ...vpn.vpnInterface, ...change } }, { requirePin: true }));
   }
   assert.notEqual(routingIdentity(vpn), routingIdentity(proxy));
+});
+test('client parameters default off and normalize explicit safe values', () => {
+  assert.deepEqual(validateClientMask(), { enabled: false, timezone: '', language: '', region: '' });
+  assert.deepEqual(validateClientMask({ enabled: true, timezone: 'Europe/Helsinki', language: 'EN-us', region: 'fi' }),
+    { enabled: true, timezone: 'Europe/Helsinki', language: 'en-US', region: 'FI' });
+  assert.equal(validateClientMask({ enabled: true, timezone: 'Europe/Helsinki', language: 'zh-Hant-TW', region: 'FI' }).language, 'zh-Hant-TW');
+  assert.equal(validateClientMask({ enabled: false, timezone: 'UTC', language: 'fr-FR', region: 'CA' }).timezone, 'UTC');
+});
+test('enabled client parameters require every explicit field and reject wrong types', () => {
+  const valid = { enabled: true, timezone: 'Europe/Helsinki', language: 'en-GB', region: 'FI' };
+  for (const field of ['timezone', 'language', 'region']) {
+    const missing = { ...valid }; delete missing[field]; assert.throws(() => validateClientMask(missing));
+    assert.throws(() => validateClientMask({ ...valid, [field]: '  ' }));
+    for (const wrong of [null, 42, true, [], {}]) assert.throws(() => validateClientMask({ ...valid, [field]: wrong }));
+  }
+  for (const value of [null, false, 'true', 1, [], { enabled: 'true' }, { enabled: 1 }]) assert.throws(() => validateClientMask(value));
+});
+test('client parameters reject invalid zones, locales and command/header injection', () => {
+  const valid = { enabled: true, timezone: 'Europe/Helsinki', language: 'en-GB', region: 'FI' };
+  const attempts = {
+    timezone: ['Invalid/Zone', 'UTC;touch /tmp/x', '$(echo UTC)', 'UTC\nLANG=ru', 'GMT+03:00'],
+    language: ['en--US', 'en-US;rm', 'en_US', 'en-US\r\nAuthorization: secret', '--proxy-server=direct'],
+    region: ['FIN', 'F1', '--FI', 'FI;rm', 'FI\nX'],
+  };
+  for (const [field, values] of Object.entries(attempts)) for (const value of values) assert.throws(() => validateClientMask({ ...valid, [field]: value }));
+});
+test('enabled region must match pinned exit; language stays explicit and route identity stays unchanged', () => {
+  const proxy = { proxyUrl: 'http://127.0.0.1:7890', expectedIp: '8.8.8.8', expectedCountry: 'FI' };
+  const mask = { enabled: true, timezone: 'Europe/Helsinki', language: 'en-GB', region: 'FI' };
+  const value = validateProfile({ ...proxy, clientMask: mask }, { requirePin: true });
+  assert.equal(value.clientMask.language, 'en-GB');
+  assert.equal(routingIdentity(value), routingIdentity(validateProfile(proxy)));
+  assert.throws(() => validateProfile({ ...proxy, clientMask: { ...mask, region: 'DE' } }, { requirePin: true }), /совпадать/);
+  assert.doesNotThrow(() => validateProfile({ ...proxy, clientMask: { ...mask, enabled: false, region: 'DE' } }, { requirePin: true }));
+});
+test('private profile preserves client parameters across reload', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdg-mask-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'profile.json');
+  const profile = validateProfile({ proxyUrl: 'http://127.0.0.1:7890', clientMask: { enabled: true, timezone: 'Europe/Helsinki', language: 'en-GB', region: 'FI' } });
+  await writePrivateJson(file, profile);
+  assert.deepEqual((await readProfile(file)).clientMask, profile.clientMask);
 });
 test('private profile round trip excludes undeclared fields and rejects symlink writes', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(),'cdg-profile-')); t.after(() => fs.rm(dir,{recursive:true,force:true}));

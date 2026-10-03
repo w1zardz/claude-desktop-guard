@@ -14,7 +14,8 @@ A desktop companion for **Claude Desktop's Code tab on macOS and Windows**. Sele
 - Optionally checks the selected **Clash/Mihomo group and final node** through its local controller. Rejects direct, load-balanced, cyclic, missing, or changed selections. It does not edit Mihomo routing rules.
 - Installs Claude Desktop's `egressProxyUrl` and Claude Code's upper/lowercase proxy settings through a recoverable local transaction. Restores only owned settings, preserves unrelated edits, and refuses conflicting changes.
 - Offers an optional **macOS process sandbox** that allows outbound connections only to the gate's loopback port. This also restricts programs launched within that process tree.
-- Displays timezone observations, compatibility findings, and local operational events. The browser-only `notme` extension is not injected into Desktop; no complete fingerprint spoofing is advertised.
+- Applies an explicit **client timezone and language profile** before starting Claude: `TZ`, `LANG`, `LC_ALL`, and Chromium `--lang`. On macOS, process-scoped Cocoa defaults also replace native preferred languages and regional locale. The host timezone and language stay unchanged. The chosen timezone must match the checked exit; a missing or changed GeoIP timezone locks the gate.
+- Distinguishes requested launch settings from measurements inside Claude. No debugger port, code injection, vendor binary patch, or TLS interception is used. Full device fingerprint masking is not provided.
 
 ## Download
 
@@ -27,8 +28,14 @@ A desktop companion for **Claude Desktop's Code tab on macOS and Windows**. Sele
 3. Click **Проверить выход**. The application does not choose an interface, address, country, account, or VPN node for you.
 4. Inspect the observed IP and country. Click **Закрепить этот IP** to accept that exact exit.
 5. In local-proxy mode, optionally configure the local Mihomo controller, selector group, and exact final node. Its secret is held in memory for this run and is not saved in the profile. Configure Mihomo itself so Claude traffic uses this group; the controller check alone does not prove every destination follows it.
-6. Click **Запустить Claude через Guard** and use a **Local** Code session. Checks repeat every 10 seconds. A failed check locks the gate; an unavailable or rate-limited probe service therefore interrupts access.
+6. Optionally enable **Часовой пояс и язык Claude**. Use the copy button to take timezone and country from the current exit check; choose the language explicitly. Then click **Запустить Claude через Guard** and use a **Local** Code session. Checks repeat every 10 seconds. A failed check locks the gate; an unavailable or rate-limited probe service therefore interrupts access.
 7. Closing Guard's window while the gate runs hides it in the tray. **Остановить барьер** closes its tunnels but leaves Claude pointing at the closed proxy. To return to the previous route, quit Claude and use **Восстановить настройки**. The next Claude launch then uses your previous settings.
+
+## Client environment verification
+
+[Validation results and reproducible checks](docs/client-validation.md) include actual Claude Desktop measurements on macOS and cross-platform Electron tests for renderer/worker timezone, DST, language headers, and child-process inheritance. Guard reports **parameters passed**, not a fictitious runtime measurement.
+
+On Windows, native preferred OS languages and regional APIs remain available to Claude even when Chromium language changes. A Windows OS timezone change can reset Chromium timezone until Claude is relaunched. Saved Desktop UI language can also differ from Chromium language. OS/platform, User-Agent, RAM/device class, GPU, fonts, Canvas/WebGL, TLS and account history are not hidden by this profile.
 
 ## Coverage and limits
 
