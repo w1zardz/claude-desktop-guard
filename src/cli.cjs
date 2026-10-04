@@ -1,6 +1,6 @@
 'use strict';
 
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const os = require('node:os');
@@ -70,6 +70,14 @@ function buildCliLaunch({ executable, args, proxyUrl, profile, env = process.env
 
 function signalCode(signal) { return 128 + (os.constants.signals[signal] || 1); }
 
+function createCliStdin({ platform = process.platform, inherited = process.stdin,
+  createReadStream = require('node:fs').createReadStream } = {}) {
+  // Electron replaces process.stdin with an EOF-only Readable on Windows.
+  // Read the inherited descriptor directly; keep it paused until verified spawn.
+  if (platform !== 'win32') return inherited;
+  return createReadStream(null, { fd: 0, autoClose: false });
+}
+
 async function signalOwnedChild(child, signal, { platform = process.platform, killProcess = process.kill, spawnCommand = spawn } = {}) {
   if (!Number.isSafeInteger(child.pid) || child.pid < 1) return child.kill(signal);
   if (platform !== 'win32') {
@@ -95,10 +103,35 @@ async function signalOwnedChild(child, signal, { platform = process.platform, ki
   });
 }
 
-function ownedGroupAlive(child, childDone, platform) {
+async function inspectMacGroup(pid) {
+  return new Promise((resolve, reject) => execFile('/bin/ps', ['-g', String(pid), '-o', 'pid=,pgid=,stat='],
+    { timeout: 500, maxBuffer: 65536, encoding: 'utf8' }, (error, stdout) => {
+      if (error && !(error.code === 1 && !stdout.trim())) return reject(error);
+      try {
+        const states = stdout.trim().split('\n').filter(Boolean).map(line => {
+          const values = line.trim().split(/\s+/);
+          if (values.length !== 3 || !/^\d+$/.test(values[0]) || Number(values[1]) !== pid || !/^[A-Za-z+<>]+$/.test(values[2])) throw new Error('Не удалось подтвердить состояние группы CLI.');
+          return values[2];
+        });
+        resolve(states);
+      } catch (error) { reject(error); }
+    }));
+}
+
+async function ownedGroupAlive(child, childDone, platform, { killProcess = process.kill, inspectGroup = inspectMacGroup } = {}) {
   if (platform === 'win32' || !Number.isSafeInteger(child.pid) || child.pid < 1) return !childDone;
-  try { process.kill(-child.pid, 0); return true; }
-  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  try { killProcess(-child.pid, 0); return true; }
+  catch (error) {
+    if (error.code === 'ESRCH') return false;
+    // Older libuv/macOS can report EPERM while an orphan group is being reaped.
+    // A bounded native snapshot distinguishes terminal zombies/empty groups
+    // from a denied live process. Live/unknown groups remain cleanup failures.
+    if (platform === 'darwin' && childDone && error.code === 'EPERM') {
+      const states = await inspectGroup(child.pid);
+      if (!states.some(state => !/^[ZX]/.test(state))) return false;
+    }
+    throw error;
+  }
 }
 
 async function runGuardedCli({ argv, dataDir, env = process.env, platform = process.platform,
@@ -140,7 +173,12 @@ async function runGuardedCli({ argv, dataDir, env = process.env, platform = proc
   const onSigint = () => cancel(new Error('Запуск CLI остановлен сигналом SIGINT.'), signalCode('SIGINT'));
   const onSigterm = () => cancel(new Error('Запуск CLI остановлен сигналом SIGTERM.'), signalCode('SIGTERM'));
   const ioError = error => cancel(new Error(`Поток CLI закрыт: ${error.code || error.message}`));
-  const inputError = error => { if (!childDone) ioError(error); };
+  const inputError = error => {
+    // Auth/update commands may deliberately close stdin before exiting. Their
+    // status still belongs to the child; parent read/output errors stay fatal.
+    if (['EPIPE', 'ECONNRESET'].includes(error.code)) { stdin.unpipe(child?.stdin); child?.stdin.destroy(); return; }
+    if (!childDone) ioError(error);
+  };
   const ioStreams = [stdin, stdout, stderr];
   ioStreams.forEach(stream => stream.on('error', ioError));
   signals.on('SIGINT', onSigint); signals.on('SIGTERM', onSigterm);
@@ -240,8 +278,8 @@ async function runGuardedCli({ argv, dataDir, env = process.env, platform = proc
       else if (platform !== 'win32' || !childDone) await stopTree('SIGTERM');
       const deadline = Date.now() + killDelayMs;
       try {
-        while (ownedGroupAlive(child, childDone, platform) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, Math.min(25, killDelayMs)));
-        if (ownedGroupAlive(child, childDone, platform)) {
+        while (await ownedGroupAlive(child, childDone, platform) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, Math.min(25, killDelayMs)));
+        if (await ownedGroupAlive(child, childDone, platform)) {
           await stopTree('SIGKILL');
           let timer;
           await Promise.race([childClosed, new Promise(resolve => { timer = setTimeout(resolve, 500); })]);
@@ -282,4 +320,4 @@ function writeHandshake(stdout, version) {
   });
 }
 
-module.exports = { parseCliArgs, buildCliLaunch, runGuardedCli, writeHandshake, signalOwnedChild, FAILURE_CODE, FAILURE_MARKER };
+module.exports = { parseCliArgs, buildCliLaunch, runGuardedCli, writeHandshake, signalOwnedChild, createCliStdin, ownedGroupAlive, FAILURE_CODE, FAILURE_MARKER };

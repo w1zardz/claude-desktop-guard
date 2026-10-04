@@ -5,7 +5,12 @@ const os = require('node:os');
 const { GuardSession } = require('./session.cjs');
 
 if (process.argv.includes('--guard-cli')) {
-  require('./cli.cjs').runGuardedCli({ argv: process.argv, dataDir: app.getPath('userData') }).then(code => app.exit(code));
+  const { runGuardedCli, createCliStdin } = require('./cli.cjs');
+  const stdin = createCliStdin();
+  runGuardedCli({ argv: process.argv, dataDir: app.getPath('userData'), stdin }).then(code => {
+    if (stdin !== process.stdin) stdin.destroy();
+    app.exit(code);
+  });
 } else if (process.argv.includes('--guard-cli-version')) {
   require('./cli.cjs').writeHandshake(process.stdout, app.getVersion()).then(code => app.exit(code));
 } else {

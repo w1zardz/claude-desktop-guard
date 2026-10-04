@@ -8,7 +8,7 @@ const { spawn } = require('node:child_process');
 const { setImmediate: nextTurn } = require('node:timers/promises');
 const { validateProfile, routingIdentity } = require('../src/profile.cjs');
 const { _createAdapter } = require('../src/amnezia.cjs');
-const { parseCliArgs, buildCliLaunch, runGuardedCli, writeHandshake, FAILURE_CODE, FAILURE_MARKER } = require('../src/cli.cjs');
+const { parseCliArgs, buildCliLaunch, runGuardedCli, writeHandshake, createCliStdin, ownedGroupAlive, FAILURE_CODE, FAILURE_MARKER } = require('../src/cli.cjs');
 
 const SELECTED = { name: 'utun4', index: 26, address: '10.8.1.2' };
 function profile(overrides = {}) {
@@ -183,7 +183,7 @@ test('normal POSIX CLI leader exit still terminates surviving owned grandchild',
     realChild = spawn(process.execPath, ['-e', code, '--', ...childArgs], options); return realChild;
   } });
   t.after(() => { if (realChild?.pid) { try { process.kill(-realChild.pid, 'SIGKILL'); } catch {} } });
-  assert.equal(await fixture.run(), 7);
+  assert.equal(await fixture.run(), 7, fixture.diagnostics());
   grandchild = Number(fixture.output()); assert.ok(Number.isSafeInteger(grandchild) && grandchild > 1);
   let gone = false;
   for (let attempt = 0; attempt < 100 && !gone; attempt++) {
@@ -231,11 +231,44 @@ test('synchronous helper death inside spawn never returns a surviving unguarded 
 });
 
 test('stdio EPIPE triggers owned child cleanup without uncaught stream errors', async () => {
-  for (const select of [fixture => fixture.stdout, fixture => fixture.children[0].child.stdin]) {
+  for (const select of [fixture => fixture.stdout, fixture => fixture.stdin]) {
     const fixture = setup(); const result = fixture.run(); const child = await started(fixture);
     select(fixture).emit('error', Object.assign(new Error('closed pipe'), { code: 'EPIPE' }));
     assert.equal(await result, FAILURE_CODE); assert.ok(child.kills.includes('SIGTERM')); assert.match(fixture.diagnostics(), /EPIPE/);
   }
+});
+
+test('child deliberate stdin close preserves its exit status; parent error handling stays separate', async () => {
+  for (const code of ['EPIPE', 'ECONNRESET']) {
+    const fixture = setup(); const result = fixture.run(); const child = await started(fixture);
+    child.stdin.emit('error', Object.assign(new Error('child stopped reading'), { code }));
+    child.finish(7);
+    assert.equal(await result, 7); assert.equal(fixture.diagnostics(), '');
+  }
+});
+
+test('macOS EPERM inspection accepts only terminal/empty owned groups, never denied live groups', async () => {
+  const denied = () => { throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' }); };
+  const child = { pid: 45678 };
+  for (const states of [[], ['Z'], ['Zs', 'X']]) assert.equal(await ownedGroupAlive(child, true, 'darwin', { killProcess: denied, inspectGroup: async () => states }), false);
+  await assert.rejects(ownedGroupAlive(child, true, 'darwin', { killProcess: denied, inspectGroup: async () => ['S'] }), /EPERM/);
+  await assert.rejects(ownedGroupAlive(child, true, 'darwin', { killProcess: denied, inspectGroup: async () => { throw new Error('inspection failed'); } }), /inspection failed/);
+  await assert.rejects(ownedGroupAlive(child, false, 'darwin', { killProcess: denied, inspectGroup: async () => [] }), /EPERM/);
+});
+
+test('Windows headless stdin uses inherited fd0 despite Electron EOF-only process.stdin', async () => {
+  const inherited = new PassThrough(); let captured;
+  const fixture = createCliStdin({ platform: 'win32', inherited, createReadStream: (file, options) => { captured = { file, options }; return new PassThrough(); } });
+  assert.notEqual(fixture, inherited); assert.deepEqual(captured, { file: null, options: { fd: 0, autoClose: false } });
+  assert.equal(createCliStdin({ platform: 'darwin', inherited }), inherited);
+  const moduleFile = require.resolve('../src/cli.cjs');
+  const code = `const {Readable}=require('node:stream');Object.defineProperty(process,'stdin',{get:()=>Readable.from([])});const input=require(process.argv[1]).createCliStdin({platform:'win32'});let data='';input.setEncoding('utf8');input.on('data',chunk=>data+=chunk);input.on('end',()=>process.stdout.write(JSON.stringify(data)));input.on('error',error=>{process.stderr.write(error.message);process.exitCode=1;});`;
+  const child = spawn(process.execPath, ['-e', code, moduleFile], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = '', diagnostics = ''; child.stdout.on('data', bytes => { output += bytes; }); child.stderr.on('data', bytes => { diagnostics += bytes; });
+  const expected = 'Юникод\n' + 'input '.repeat(20000);
+  child.stdin.end(expected);
+  const exit = await new Promise(resolve => child.once('close', resolve));
+  assert.equal(exit, 0, diagnostics); assert.equal(JSON.parse(output), expected);
 });
 
 test('owned child ignoring SIGTERM is killed within bounded cleanup', async () => {
