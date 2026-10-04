@@ -19,15 +19,28 @@ function profile(overrides = {}) {
 }
 const sample = overrides => ({ ip: '8.8.8.8', country: 'FI', timezone: 'Europe/Helsinki', ...overrides });
 const args = extra => ['--guard-cli', '--claude-executable', process.execPath, '--', ...(extra || ['-p', 'fixture only'])];
-function setup(options = {}) {
+function setup(t, options = {}) {
   const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough(), signals = new EventEmitter();
   let output = '', diagnostics = '';
   stdout.on('data', chunk => { output += chunk; }); stderr.on('data', chunk => { diagnostics += chunk; });
   const children = [];
+  let notifySpawn, running, cleanup;
+  const spawned = new Promise(resolve => { notifySpawn = resolve; });
+  const spawnChild = options.spawnChild || (() => fakeChild());
   const dependencies = { argv: args(), dataDir: process.cwd(), stdin, stdout, stderr, signals, env: {},
     loadProfile: async () => profile(), auditPolicy: async () => [], binding: async () => ({ enabled: false }), probe: async () => sample(), killDelayMs: 10,
-    spawnChild: (...input) => { const child = fakeChild(); children.push({ child, input }); return child; }, ...options };
-  return { stdin, stdout, stderr, signals, children, dependencies, output: () => output, diagnostics: () => diagnostics, run: () => runGuardedCli(dependencies) };
+    ...options, spawnChild: (...input) => {
+      const child = spawnChild(...input); children.push({ child, input }); notifySpawn(child); return child;
+    } };
+  const fixture = { stdin, stdout, stderr, signals, children, dependencies, spawned,
+    output: () => output, diagnostics: () => diagnostics, run: () => (running ||= runGuardedCli(dependencies)),
+    cleanup: () => (cleanup ||= (async () => {
+      if (!running) return;
+      signals.emit('SIGTERM');
+      await bounded(running, 3000, 'CLI fixture teardown did not finish');
+    })()) };
+  t.after(() => fixture.cleanup());
+  return fixture;
 }
 function fakeChild() {
   const child = new EventEmitter();
@@ -41,8 +54,21 @@ function fakeChild() {
   child.kill = (signal = 'SIGTERM') => { child.kills.push(signal); setImmediate(() => child.finish(null, signal)); return true; };
   return child;
 }
-async function started(fixture) {
-  for (let tries = 0; tries < 100 && !fixture.children.length; tries++) await nextTurn();
+async function bounded(operation, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); })]);
+  } finally { clearTimeout(timer); }
+}
+async function started(fixture, timeoutMs = 3000) {
+  let child;
+  try {
+    child = await bounded(Promise.race([fixture.spawned, fixture.run().then(() => null)]), timeoutMs, 'CLI fixture did not reach child spawn');
+  } catch (error) {
+    await fixture.cleanup();
+    throw error;
+  }
+  if (!child) await fixture.cleanup();
   assert.equal(fixture.children.length, 1, fixture.diagnostics());
   return fixture.children[0].child;
 }
@@ -51,6 +77,23 @@ function helperFixture() {
   helper.close = async () => { helper.closes++; helper.alive = false; };
   return helper;
 }
+
+test('fixture readiness waits for spawn after slow executable validation, independent of event-loop turns', async t => {
+  const fixture = setup(t, { validateExecutable: async () => { await new Promise(resolve => setTimeout(resolve, 50)); } });
+  const result = fixture.run();
+  const child = await started(fixture);
+  child.finish(7);
+  assert.equal(await result, 7);
+});
+
+test('fixture readiness timeout cancels and awaits cleanup before a late child can start', async t => {
+  const fixture = setup(t, { validateExecutable: async () => { await new Promise(resolve => setTimeout(resolve, 50)); } });
+  fixture.run();
+  await assert.rejects(started(fixture, 5), /did not reach child spawn/);
+  assert.equal(fixture.children.length, 0);
+  assert.equal(fixture.signals.listenerCount('SIGTERM'), 0);
+  assert.equal(await fixture.run(), 143);
+});
 
 test('CLI requires explicit absolute executable and rejects competing settings flags', () => {
   assert.deepEqual(parseCliArgs(args(['-p', 'quoted $() ` ; prompt'])), { executable: process.execPath, args: ['-p', 'quoted $() ` ; prompt'] });
@@ -82,7 +125,7 @@ test('strict Mac profile confines CLI executable to numeric local gate; unsuppor
   assert.throws(() => buildCliLaunch({ executable: process.execPath, args: [], proxyUrl: 'http://127.0.0.1:1', profile: profile({ strictMac: true }), platform: 'win32' }));
 });
 
-test('missing/unpinned profile, disabled mask and managed/runtime overrides never spawn child', async () => {
+test('missing/unpinned profile, disabled mask and managed/runtime overrides never spawn child', async t => {
   for (const options of [
     { loadProfile: async () => null },
     { loadProfile: async () => ({ ...profile(), pinIdentity: undefined }) },
@@ -93,57 +136,57 @@ test('missing/unpinned profile, disabled mask and managed/runtime overrides neve
     { env: { ELECTRON_RUN_AS_NODE: '1' } },
   ]) {
     let probes = 0;
-    const fixture = setup({ probe: async () => { probes++; return sample(); }, ...options });
+    const fixture = setup(t, { probe: async () => { probes++; return sample(); }, ...options });
     assert.equal(await fixture.run(), FAILURE_CODE); assert.equal(probes, 0); assert.equal(fixture.children.length, 0);
     assert.match(fixture.diagnostics(), /^\[Claude Desktop Guard\]/m);
   }
 });
 
-test('real GuardGate rejects changed IP/country/timezone or missing timezone before child start', async () => {
+test('real GuardGate rejects changed IP/country/timezone or missing timezone before child start', async t => {
   for (const changed of [{ ip: '1.1.1.1' }, { country: 'RU' }, { timezone: 'Europe/Moscow' }, { timezone: null }]) {
-    const fixture = setup({ probe: async () => sample(changed) });
+    const fixture = setup(t, { probe: async () => sample(changed) });
     assert.equal(await fixture.run(), FAILURE_CODE); assert.equal(fixture.children.length, 0);
     assert.match(fixture.diagnostics(), /^\[Claude Desktop Guard\]/m);
   }
 });
 
-test('missing selected interface and helper already dead at readiness fail closed', async () => {
+test('missing selected interface and helper already dead at readiness fail closed', async t => {
   let opened = 0;
-  const gone = setup({ loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
+  const gone = setup(t, { loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
     listInterfaces: async () => [{ ...SELECTED, index: SELECTED.index + 1 }], openAmnezia: async () => { opened++; },
   } });
   assert.equal(await gone.run(), FAILURE_CODE); assert.equal(opened, 0); assert.equal(gone.children.length, 0);
   const helper = helperFixture(); helper.alive = false;
-  const dead = setup({ loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
+  const dead = setup(t, { loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
     listInterfaces: async () => [SELECTED], openAmnezia: async () => helper,
   } });
   assert.equal(await dead.run(), FAILURE_CODE); assert.equal(dead.children.length, 0); assert.equal(helper.closes, 1);
 });
 
-test('signal aborts pending exit verification and cannot produce a late child launch', async () => {
+test('signal aborts pending exit verification and cannot produce a late child launch', async t => {
   let release, checking;
   const entered = new Promise(resolve => { checking = resolve; });
-  const fixture = setup({ probe: async () => { checking(); return new Promise(resolve => { release = resolve; }); } });
+  const fixture = setup(t, { probe: async () => { checking(); return new Promise(resolve => { release = resolve; }); } });
   const result = fixture.run(); await entered;
   fixture.signals.emit('SIGTERM'); assert.equal(await result, 143); assert.equal(fixture.children.length, 0);
   release(sample()); await nextTurn(); assert.equal(fixture.children.length, 0);
 });
 
-test('running gate lock kills owned CLI and restores no Desktop settings', async () => {
+test('running gate lock kills owned CLI and restores no Desktop settings', async t => {
   let gate;
   const { GuardGate } = require('../src/network.cjs');
   class CaptureGate extends GuardGate { constructor(options) { super(options); gate = this; } }
-  const fixture = setup({ Gate: CaptureGate }); const result = fixture.run(); const child = await started(fixture);
+  const fixture = setup(t, { Gate: CaptureGate }); const result = fixture.run(); const child = await started(fixture);
   gate.lock('fixture lost route');
   assert.equal(await result, FAILURE_CODE); assert.ok(child.kills.includes('SIGTERM'));
   assert.equal(gate.status().running, false); assert.equal(fixture.output(), ''); assert.match(fixture.diagnostics(), /fixture lost route/);
 });
 
-test('Guard failure marker starts its own line after child stderr without final newline', async () => {
+test('Guard failure marker starts its own line after child stderr without final newline', async t => {
   let gate;
   const { GuardGate } = require('../src/network.cjs');
   class CaptureGate extends GuardGate { constructor(options) { super(options); gate = this; } }
-  const fixture = setup({ Gate: CaptureGate }); const result = fixture.run(); const child = await started(fixture);
+  const fixture = setup(t, { Gate: CaptureGate }); const result = fixture.run(); const child = await started(fixture);
   child.stderr.write('native diagnostic without newline'); gate.lock('fixture refusal');
   assert.equal(await result, FAILURE_CODE);
   assert.match(fixture.diagnostics(), /^native diagnostic without newline\n\[Claude Desktop Guard\] /);
@@ -154,7 +197,7 @@ test('real owned CLI tree includes grandchild; gate lock terminates both', async
   const { GuardGate } = require('../src/network.cjs');
   class CaptureGate extends GuardGate { constructor(options) { super(options); gate = this; } }
   const code = `const{spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},10000)'],{stdio:'ignore'});process.stdout.write(String(c.pid));setInterval(()=>{},10000);`;
-  const fixture = setup({ Gate: CaptureGate, killDelayMs: 100, spawnChild: (_executable, childArgs, options) => {
+  const fixture = setup(t, { Gate: CaptureGate, killDelayMs: 100, spawnChild: (_executable, childArgs, options) => {
     assert.equal(options.detached, process.platform !== 'win32'); realChild = spawn(process.execPath, ['-e', code, '--', ...childArgs], options); return realChild;
   } });
   t.after(() => {
@@ -179,7 +222,7 @@ test('real owned CLI tree includes grandchild; gate lock terminates both', async
 test('normal POSIX CLI leader exit still terminates surviving owned grandchild', { skip: process.platform === 'win32' }, async t => {
   let realChild, grandchild;
   const code = `const{spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},10000)'],{stdio:'ignore'});process.stdout.write(String(c.pid));process.exit(7);`;
-  const fixture = setup({ killDelayMs: 100, spawnChild: (_executable, childArgs, options) => {
+  const fixture = setup(t, { killDelayMs: 100, spawnChild: (_executable, childArgs, options) => {
     realChild = spawn(process.execPath, ['-e', code, '--', ...childArgs], options); return realChild;
   } });
   t.after(() => { if (realChild?.pid) { try { process.kill(-realChild.pid, 'SIGKILL'); } catch {} } });
@@ -193,28 +236,28 @@ test('normal POSIX CLI leader exit still terminates surviving owned grandchild',
   assert.equal(gone, true, 'owned grandchild survived normal leader exit');
 });
 
-test('a lock immediately after gate start prevents child launch', async () => {
+test('a lock immediately after gate start prevents child launch', async t => {
   const { GuardGate } = require('../src/network.cjs');
   class LockOnReady extends GuardGate {
     async start() { const proxy = await super.start(); this.lock('fixture readiness race'); return proxy; }
   }
-  const fixture = setup({ Gate: LockOnReady });
+  const fixture = setup(t, { Gate: LockOnReady });
   assert.equal(await fixture.run(), FAILURE_CODE); assert.equal(fixture.children.length, 0);
 });
 
-test('changed managed policy on repeated verification closes gate and owned child', async () => {
+test('changed managed policy on repeated verification closes gate and owned child', async t => {
   let gate, policyChecks = 0;
   const { GuardGate } = require('../src/network.cjs');
   class CaptureGate extends GuardGate { constructor(options) { super(options); gate = this; } }
-  const fixture = setup({ Gate: CaptureGate, auditPolicy: async () => { if (++policyChecks > 2) throw new Error('managed policy changed'); return []; } });
+  const fixture = setup(t, { Gate: CaptureGate, auditPolicy: async () => { if (++policyChecks > 2) throw new Error('managed policy changed'); return []; } });
   const result = fixture.run(); const child = await started(fixture);
   await assert.rejects(gate.verify(), /managed policy changed/);
   assert.equal(await result, FAILURE_CODE); assert.ok(child.kills.includes('SIGTERM')); assert.equal(gate.status().running, false);
 });
 
-test('helper death while running kills owned CLI and closes helper exactly once', async () => {
+test('helper death while running kills owned CLI and closes helper exactly once', async t => {
   const helper = helperFixture();
-  const fixture = setup({ loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
+  const fixture = setup(t, { loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
     listInterfaces: async () => [SELECTED], openAmnezia: async () => helper,
   } });
   const result = fixture.run(); const child = await started(fixture);
@@ -222,32 +265,32 @@ test('helper death while running kills owned CLI and closes helper exactly once'
   assert.equal(await result, FAILURE_CODE); assert.ok(child.kills.includes('SIGTERM')); assert.equal(helper.closes, 1);
 });
 
-test('synchronous helper death inside spawn never returns a surviving unguarded child', async () => {
+test('synchronous helper death inside spawn never returns a surviving unguarded child', async t => {
   const helper = helperFixture(); const child = fakeChild();
-  const fixture = setup({ loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
+  const fixture = setup(t, { loadProfile: async () => profile({ mode: 'amnezia', vpnInterface: SELECTED }), amnezia: {
     listInterfaces: async () => [SELECTED], openAmnezia: async () => helper,
   }, spawnChild: () => { helper.alive = false; helper.emit('exit', 1); return child; } });
   assert.equal(await fixture.run(), FAILURE_CODE); assert.ok(child.kills.includes('SIGTERM')); assert.equal(helper.closes, 1);
 });
 
-test('stdio EPIPE triggers owned child cleanup without uncaught stream errors', async () => {
+test('stdio EPIPE triggers owned child cleanup without uncaught stream errors', async t => {
   for (const select of [fixture => fixture.stdout, fixture => fixture.stdin]) {
-    const fixture = setup(); const result = fixture.run(); const child = await started(fixture);
+    const fixture = setup(t); const result = fixture.run(); const child = await started(fixture);
     select(fixture).emit('error', Object.assign(new Error('closed pipe'), { code: 'EPIPE' }));
     assert.equal(await result, FAILURE_CODE); assert.ok(child.kills.includes('SIGTERM')); assert.match(fixture.diagnostics(), /EPIPE/);
   }
 });
 
-test('child deliberate stdin close preserves its exit status; parent error handling stays separate', async () => {
+test('child deliberate stdin close preserves its exit status; parent error handling stays separate', async t => {
   for (const code of ['EPIPE', 'ECONNRESET']) {
-    const fixture = setup(); const result = fixture.run(); const child = await started(fixture);
+    const fixture = setup(t); const result = fixture.run(); const child = await started(fixture);
     child.stdin.emit('error', Object.assign(new Error('child stopped reading'), { code }));
     child.finish(7);
     assert.equal(await result, 7); assert.equal(fixture.diagnostics(), '');
   }
 });
 
-test('macOS EPERM inspection accepts only terminal/empty owned groups, never denied live groups', async () => {
+test('macOS EPERM inspection accepts only terminal/empty owned groups, never denied live groups', async t => {
   const denied = () => { throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' }); };
   const child = { pid: 45678 };
   for (const states of [[], ['Z'], ['Zs', 'X']]) assert.equal(await ownedGroupAlive(child, true, 'darwin', { killProcess: denied, inspectGroup: async () => states }), false);
@@ -256,7 +299,7 @@ test('macOS EPERM inspection accepts only terminal/empty owned groups, never den
   await assert.rejects(ownedGroupAlive(child, false, 'darwin', { killProcess: denied, inspectGroup: async () => [] }), /EPERM/);
 });
 
-test('Windows headless stdin uses inherited fd0 despite Electron EOF-only process.stdin', async () => {
+test('Windows headless stdin uses inherited fd0 despite Electron EOF-only process.stdin', async t => {
   const inherited = new PassThrough(); let captured;
   const fixture = createCliStdin({ platform: 'win32', inherited, createReadStream: (file, options) => { captured = { file, options }; return new PassThrough(); } });
   assert.notEqual(fixture, inherited); assert.deepEqual(captured, { file: null, options: { fd: 0, autoClose: false } });
@@ -271,17 +314,17 @@ test('Windows headless stdin uses inherited fd0 despite Electron EOF-only proces
   assert.equal(exit, 0, diagnostics); assert.equal(JSON.parse(output), expected);
 });
 
-test('owned child ignoring SIGTERM is killed within bounded cleanup', async () => {
-  const fixture = setup(); const result = fixture.run(); const child = await started(fixture);
+test('owned child ignoring SIGTERM is killed within bounded cleanup', async t => {
+  const fixture = setup(t); const result = fixture.run(); const child = await started(fixture);
   child.kill = signal => { child.kills.push(signal); if (signal === 'SIGKILL') setImmediate(() => child.finish(null, signal)); return true; };
   fixture.signals.emit('SIGINT');
   assert.equal(await result, 130); assert.ok(child.kills.includes('SIGKILL')); assert.equal(child.done, true);
 });
 
-test('real inert child receives owned env/settings, original args and stdin; stdout/code unchanged', async () => {
+test('real inert child receives owned env/settings, original args and stdin; stdout/code unchanged', async t => {
   const code = `let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',v=>input+=v);process.stdin.on('end',()=>{process.stdout.write(JSON.stringify({input,args:process.argv.slice(1),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,env:{TZ:process.env.TZ,LANG:process.env.LANG,LC_ALL:process.env.LC_ALL,HTTPS_PROXY:process.env.HTTPS_PROXY,NO_PROXY:process.env.NO_PROXY}}));process.stderr.write('fixture stderr');process.exitCode=7;});`;
   let original;
-  const fixture = setup({ argv: args(['-p', 'literal prompt $()']), spawnChild: (executable, childArgs, options) => {
+  const fixture = setup(t, { argv: args(['-p', 'literal prompt $()']), spawnChild: (executable, childArgs, options) => {
     original = { executable, childArgs, options }; return spawn(process.execPath, ['-e', code, '--', ...childArgs], options);
   } });
   fixture.stdin.end('exact stdin\n');
@@ -293,7 +336,7 @@ test('real inert child receives owned env/settings, original args and stdin; std
   assert.equal(fixture.diagnostics(), 'fixture stderr'); assert.equal(fixture.signals.listenerCount('SIGTERM'), 0);
 });
 
-test('native helper opening observes cancellation before readiness and destroys owned process', async () => {
+test('native helper opening observes cancellation before readiness and destroys owned process', async t => {
   const child = fakeChild(); const controller = new AbortController();
   const api = _createAdapter({ platform: 'darwin', spawnHelper: async () => child, readinessMs: 1000, shutdownMs: 5 });
   const opening = api.openAmnezia(SELECTED, { signal: controller.signal });
@@ -301,7 +344,7 @@ test('native helper opening observes cancellation before readiness and destroys 
   await assert.rejects(opening, /cancelled/); assert.ok(child.kills.includes('SIGTERM')); assert.equal(child.done, true);
 });
 
-test('native interface discovery observes cancellation and never returns a late tuple', async () => {
+test('native interface discovery observes cancellation and never returns a late tuple', async t => {
   const child = fakeChild(); const controller = new AbortController();
   const api = _createAdapter({ platform: 'darwin', spawnHelper: async () => child, readinessMs: 1000 });
   const listing = api.listInterfaces({ signal: controller.signal });
@@ -309,7 +352,7 @@ test('native interface discovery observes cancellation and never returns a late 
   assert.ok(child.kills.includes('SIGTERM')); await nextTurn(); assert.equal(child.done, true);
 });
 
-test('headless version handshake is isolated JSON; closed stdout returns failure', async () => {
+test('headless version handshake is isolated JSON; closed stdout returns failure', async t => {
   const output = new PassThrough(); let text = ''; output.on('data', data => { text += data; });
   assert.equal(await writeHandshake(output, '0.4.0'), 0); assert.deepEqual(JSON.parse(text), { version: '0.4.0', headlessCli: true });
   const closed = new PassThrough(); closed.destroy(); assert.equal(await writeHandshake(closed, '0.4.0'), FAILURE_CODE);

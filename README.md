@@ -62,7 +62,7 @@ The official app has proxy-bypass paths and startup behavior outside the gate's 
 
 Project-level `.claude/settings.json` / `.claude/settings.local.json` can override user proxy settings in local claude.ai Code sessions. This tool does not rewrite your project files. Managed-provider sessions have different precedence rules. Pre-existing background supervisors and other processes outside the launched tree also need separate control. See the [official proxy and launcher scope rules](https://code.claude.com/docs/en/network-config).
 
-## Guarded Claude CLI (0.4.1 and later)
+## Guarded Claude CLI (0.4.2 and later)
 
 Save an explicitly pinned route and enable its timezone/language/region profile in the GUI first. The headless launcher opens an independent gate from that saved profile, checks it before spawning Claude, and coexists with the GUI without changing Desktop or Claude user settings.
 

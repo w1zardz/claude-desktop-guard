@@ -1,6 +1,6 @@
 {
   "name": "claude-desktop-guard",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "A local, fail-closed proxy gate and reversible launcher for Claude Desktop on macOS and Windows.",
   "author": "w1zardz",
   "license": "MIT",
@@ -13,7 +13,7 @@
     "helper:build": "node scripts/build-vpn-helper.cjs",
     "test:helper": "cd native/vpn-helper && go test ./...",
     "start": "electron .",
-    "test": "node --test test/*.test.cjs",
+    "test": "node --test --test-timeout=30000 test/*.test.cjs",
     "test:ui": "node scripts/ui-smoke.cjs",
     "check": "node scripts/check.cjs",
     "predist": "npm run helper:build",
