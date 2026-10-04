@@ -9,6 +9,12 @@ import (
 )
 
 func main() {
+	// Prove that denial never reaches even the first action of the owned child.
+	startedFile := os.Getenv("CDG_SMOKE_STARTED_FILE")
+	if startedFile == "" || os.WriteFile(startedFile, []byte("fixture started\n"), 0600) != nil {
+		fmt.Fprintln(os.Stderr, "fixture requires writable start marker")
+		os.Exit(95)
+	}
 	args := os.Args[1:]
 	if len(args) < 2 || args[0] != "--settings" {
 		fmt.Fprintln(os.Stderr, "fixture requires owned inline settings")

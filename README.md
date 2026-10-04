@@ -62,7 +62,7 @@ The official app has proxy-bypass paths and startup behavior outside the gate's 
 
 Project-level `.claude/settings.json` / `.claude/settings.local.json` can override user proxy settings in local claude.ai Code sessions. This tool does not rewrite your project files. Managed-provider sessions have different precedence rules. Pre-existing background supervisors and other processes outside the launched tree also need separate control. See the [official proxy and launcher scope rules](https://code.claude.com/docs/en/network-config).
 
-## Guarded Claude CLI (0.4.2 and later)
+## Guarded Claude CLI (0.4.3 and later)
 
 Save an explicitly pinned route and enable its timezone/language/region profile in the GUI first. The headless launcher opens an independent gate from that saved profile, checks it before spawning Claude, and coexists with the GUI without changing Desktop or Claude user settings.
 
@@ -72,6 +72,8 @@ Save an explicitly pinned route and enable its timezone/language/region profile 
 ```
 
 On Windows, extract the Windows ZIP and invoke the inner `Claude Desktop Guard.exe`; the portable GUI wrapper is not the CLI transport. Pass the absolute path to native `claude.exe` (not a `.cmd` or `.bat` shim). Integrations can inspect `--guard-cli-version`: stdout is one JSON object containing `version` and `headlessCli`.
+
+[Electron on Windows](https://github.com/electron/electron/blob/v44.5.1/shell/app/electron_main_delegate.cc#L187-L190) adds one native leading `\r\n` before JavaScript starts, including on a Guard refusal. JSON accepts this prefix; raw byte comparisons must account for exactly this prefix.
 
 The child receives proxy variables, `TZ`, `LANG`, `LC_ALL`, `CLAUDE_CODE_PROXY_RESOLVES_HOSTS=1` and `DISABLE_ERROR_REPORTING=1` through its environment and command-line `--settings`. This overrides ordinary project/user environment settings; caller `--settings` and `--setting-sources` are rejected. Optional crash reporting is disabled; mandatory security/region processing is unaffected. stdin/stdout and ordinary child exit status are preserved. A Guard refusal emits `[Claude Desktop Guard]` on stderr and exits with code `78`.
 

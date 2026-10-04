@@ -146,16 +146,25 @@ async function main() {
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
   await replaceOwnedProfile(profile);
 
-  const childEnv = { ...process.env, NODE_EXTRA_CA_CERTS: path.join(fixtureRoot, 'packaged-tls', 'public-test-cert.pem'), NODE_TLS_REJECT_UNAUTHORIZED: '1' };
+  const startedFile = path.join(temporary, 'child-started');
+  const childEnv = { ...process.env, CDG_SMOKE_STARTED_FILE: startedFile,
+    NODE_EXTRA_CA_CERTS: path.join(fixtureRoot, 'packaged-tls', 'public-test-cert.pem'), NODE_TLS_REJECT_UNAUTHORIZED: '1' };
   delete childEnv.NODE_OPTIONS; delete childEnv.ELECTRON_RUN_AS_NODE;
   const originalArgs = ['-p', 'inert fixture; no model request $()'];
   const originalInput = 'exact stdin\nЮникод\n';
   const invoke = () => execute(executable, ['--guard-cli', '--claude-executable', childFixture, '--', ...originalArgs], { env: childEnv, input: originalInput });
   const result = await invoke();
   assert.equal(result.code, 7, result.diagnostics);
+  assert.equal(await fs.readFile(startedFile, 'utf8'), 'fixture started\n', 'Successful wrapper never started the inert child.');
   assert.ok(!result.diagnostics.includes('[Claude Desktop Guard]'), result.diagnostics);
   assert.ok(result.diagnostics.includes('fixture stderr without final newline'), result.diagnostics);
-  const decoded = JSON.parse(result.output);
+  // Electron writes one native startup newline on Windows before JavaScript.
+  // Account for only this exact prefix; retain every byte of the child payload.
+  const startupPrefix = process.platform === 'win32' ? '\r\n' : '';
+  assert.equal(result.output.slice(0, startupPrefix.length), startupPrefix);
+  const childOutput = result.output.slice(startupPrefix.length);
+  assert.ok(childOutput.startsWith('{'), 'Unexpected stdout bytes before child JSON.');
+  const decoded = JSON.parse(childOutput);
   assert.equal(decoded.input, originalInput); assert.deepEqual(decoded.args, originalArgs);
   assert.equal(decoded.env.TZ, 'Europe/Helsinki'); assert.equal(decoded.env.LANG, 'en_US.UTF-8'); assert.equal(decoded.env.LC_ALL, 'en_US.UTF-8');
   assert.equal(decoded.env.DISABLE_ERROR_REPORTING, '1'); assert.equal(decoded.env.CLAUDE_CODE_PROXY_RESOLVES_HOSTS, '1');
@@ -166,8 +175,10 @@ async function main() {
   assert.ok(geographyRequests > 0, 'Packaged CLI did not verify the offline TLS exit.');
 
   await replaceOwnedProfile({ ...profile, expectedIp: '1.1.1.1' });
+  await fs.unlink(startedFile);
   const refusal = await invoke();
-  assert.equal(refusal.code, 78, refusal.diagnostics); assert.equal(refusal.output, '');
+  assert.equal(refusal.code, 78, refusal.diagnostics); assert.equal(refusal.output, startupPrefix);
+  assert.equal(await existing(startedFile), null, 'Pinned-exit refusal started the inert child.');
   assert.match(refusal.diagnostics, /^\[Claude Desktop Guard\]/m);
   assert.deepEqual(unexpectedTargets, []);
   console.log(`Packaged ${process.platform}/${process.arch} CLI verified: version, trusted offline TLS gate, exact stdin/stdout/args/env, child exit7, pinned-exit refusal78.`);
