@@ -1,6 +1,6 @@
 {
   "name": "claude-desktop-guard",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A local, fail-closed proxy gate and reversible launcher for Claude Desktop on macOS and Windows.",
   "author": "w1zardz",
   "license": "MIT",

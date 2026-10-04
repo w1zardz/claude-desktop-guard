@@ -402,6 +402,10 @@ class GuardGate extends EventEmitter {
     this._server = server;
     server.on('connection', socket => {
       this._connections.add(socket);
+      // CONNECT detaches the HTTP parser's socket error handler. Keep our own
+      // for rejection replies and pending tunnels, including async EPIPE/reset.
+      // A local client disappearing closes its tunnel, not the verified route.
+      socket.on('error', () => socket.destroy());
       socket.once('close', () => this._connections.delete(socket));
     });
     server.on('connect', (request, client, head) => { this._handleConnect(request, client, head).catch(error => this.lock(`Tunnel failed: ${error.message}`)); });
@@ -478,7 +482,6 @@ class GuardGate extends EventEmitter {
       upstream.once('close', () => { this._connections.delete(upstream); client.destroy(); });
       client.once('close', () => upstream.destroy());
       upstream.on('error', error => this.lock(`Upstream tunnel error: ${error.message}`));
-      client.on('error', error => this.lock(`Local tunnel error: ${error.message}`));
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length) upstream.write(head);
       client.pipe(upstream);

@@ -264,6 +264,87 @@ test('upstream failure locks gate and never falls back to direct transport', asy
   await assert.rejects(gate.verify(), /explicit start/);
 });
 
+test('locked CONNECT handles asynchronous rejection write errors without reopening', async t => {
+  let calls = 0;
+  const gate = makeGate(t, { connect: async () => { calls++; throw new Error('Should not connect'); } });
+  const local = await gate.start();
+  gate.lock('Changed exit');
+  for (const code of ['EPIPE', 'ECONNRESET']) {
+    let closed = false;
+    // Use a real accepted socket, but make the write fail deterministically:
+    // peer-reset timing differs between macOS, Windows and Linux.
+    gate._server.prependOnceListener('connect', (_request, socket) => {
+      socket._write = (_chunk, _encoding, callback) => {
+        process.nextTick(() => callback(Object.assign(new Error(`write ${code}`), { code })));
+      };
+      socket.once('close', () => { closed = true; });
+    });
+    await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
+    await waitUntil(() => closed);
+    assert.equal(gate.status().locked, true);
+    assert.equal(gate.status().reason, 'Changed exit');
+    assert.equal(calls, 0);
+  }
+  assert.match(await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 503/);
+  assert.equal(calls, 0);
+});
+
+test('local CONNECT write failure closes only its tunnel and leaves verified gate usable', async t => {
+  const upstreams = [];
+  const gate = makeGate(t, { connect: async () => {
+    const upstream = new PassThrough();
+    upstreams.push(upstream);
+    return upstream;
+  } });
+  const local = await gate.start();
+  gate._server.prependOnceListener('connect', (_request, socket) => {
+    socket._write = (_chunk, _encoding, callback) => {
+      process.nextTick(() => callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })));
+    };
+  });
+  await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
+  await waitUntil(() => upstreams.length === 1 && upstreams[0].destroyed);
+  assert.equal(gate.status().healthy, true);
+  assert.equal(gate.status().locked, false);
+  assert.match(await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 200/);
+  assert.equal(upstreams.length, 2);
+});
+
+test('local reset during CONNECT cancels pending transport and destroys late upstream', async t => {
+  let accepted;
+  let release;
+  let signal;
+  const late = new PassThrough();
+  const gate = makeGate(t, { connect: (_proxy, _authority, _timeout, options) => {
+    signal = options.signal;
+    return new Promise(resolve => { release = resolve; });
+  } });
+  const local = await gate.start();
+  gate._server.prependOnceListener('connect', (_request, socket) => { accepted = socket; });
+  const socket = client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n');
+  const response = collectHeader(socket);
+  await waitUntil(() => release);
+  accepted.destroy(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
+  await response;
+  await waitUntil(() => signal.aborted);
+  release(late);
+  await waitUntil(() => late.destroyed);
+  assert.equal(gate.status().healthy, true);
+  assert.equal(gate._pending.size, 0);
+});
+
+test('upstream socket errors still lock verified gate and close local tunnels', async t => {
+  const upstream = new PassThrough();
+  const gate = makeGate(t, { connect: async () => upstream });
+  const local = await gate.start();
+  const socket = client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n');
+  assert.match(await collectHeader(socket), /^HTTP\/1\.1 200/);
+  upstream.destroy(Object.assign(new Error('upstream reset'), { code: 'ECONNRESET' }));
+  await waitUntil(() => socket.destroyed);
+  assert.equal(gate.status().locked, true);
+  assert.match(gate.status().reason, /Upstream tunnel error/);
+});
+
 test('lock destroys active and pending native socket tunnels', async t => {
   let upstreamCount = 0;
   let closedCount = 0;
