@@ -4,8 +4,14 @@ const path = require('node:path');
 const os = require('node:os');
 const { GuardSession } = require('./session.cjs');
 
+if (process.argv.includes('--guard-cli')) {
+  require('./cli.cjs').runGuardedCli({ argv: process.argv, dataDir: app.getPath('userData') }).then(code => app.exit(code));
+} else if (process.argv.includes('--guard-cli-version')) {
+  require('./cli.cjs').writeHandshake(process.stdout, app.getVersion()).then(code => app.exit(code));
+} else {
 let window; let session; let tray; let quitting = false; let shutdownPending = false; let shutdownDone = false;
 const smoke = process.argv.includes('--smoke-test');
+if (smoke) app.setPath('userData', path.join(os.tmpdir(), `cdg-smoke-${process.pid}`));
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { window?.show(); window?.focus(); });
@@ -27,7 +33,7 @@ else {
     };
     for (const [command, action] of Object.entries({ snapshot: () => session.snapshot(), interfaces: () => session.interfaces(),
       probe: input => session.probe(input), pin: input => session.pin(input),
-      start: input => session.start(input), stop: () => session.stop(), restore: () => session.restore(),
+      start: input => session.start(input), recheck: () => session.recheck(), stop: () => session.stop(), restore: () => session.restore(),
     })) {
       ipcMain.handle(`guard:${command}`, async (event, input) => {
         allowedSender(event);
@@ -68,3 +74,4 @@ app.on('before-quit', event => {
   shutdownPending = true;
   session.shutdown().finally(() => { shutdownDone = true; app.quit(); });
 });
+}

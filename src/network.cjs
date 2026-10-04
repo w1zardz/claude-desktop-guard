@@ -319,6 +319,7 @@ class GuardGate extends EventEmitter {
     this._connections = new Set();
     this._pending = new Set();
     this._verification = null;
+    this._transportCheck = null;
     this._interval = null;
     this._expiryTimer = null;
   }
@@ -432,8 +433,12 @@ class GuardGate extends EventEmitter {
   }
 
   async _handleConnect(request, client, head) {
+    if (this._transportCheck && !this._locked) {
+      if (!client.destroyed) client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+      return;
+    }
     if (!this._isFresh()) {
-      if (!this._locked) this.lock('Exit verification became stale');
+      if (!this._locked && this._verifiedAt !== null) this.lock('Exit verification became stale');
       if (!client.destroyed) client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -472,6 +477,11 @@ class GuardGate extends EventEmitter {
       ]);
       if (!upstream || typeof upstream.pipe !== 'function' || typeof upstream.destroy !== 'function') throw new Error('Invalid upstream tunnel socket');
       // Lock or stop can happen while CONNECT is in flight. Never send 200 after it.
+      if (this._transportCheck && !this._locked) {
+        upstream.destroy();
+        if (!client.destroyed) client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+        return;
+      }
       if (generation !== this._generation || !this._isFresh() || client.destroyed || pending.signal.aborted) {
         upstream.destroy();
         if (generation === this._generation && !this._locked && !client.destroyed) this.lock('Exit verification became stale');
@@ -481,7 +491,13 @@ class GuardGate extends EventEmitter {
       this._connections.add(upstream);
       upstream.once('close', () => { this._connections.delete(upstream); client.destroy(); });
       client.once('close', () => upstream.destroy());
-      upstream.on('error', error => this.lock(`Upstream tunnel error: ${error.message}`));
+      // A remote endpoint resetting one tunnel does not establish route drift.
+      // Close that tunnel, then recheck the same selected upstream. Never dial
+      // the target directly or replace the pinned route after a failure.
+      upstream.on('error', () => {
+        client.destroy();
+        this._checkAfterTunnelFailure();
+      });
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length) upstream.write(head);
       client.pipe(upstream);
@@ -489,7 +505,7 @@ class GuardGate extends EventEmitter {
       upstream.resume();
     } catch (error) {
       upstream?.destroy();
-      if (generation === this._generation && !this._locked && !client.destroyed) this.lock(`Upstream CONNECT failed: ${error.message}`);
+      if (generation === this._generation && !this._locked && !client.destroyed) this._checkAfterTunnelFailure();
       client.destroy();
     } finally {
       clearTimeout(timer);
@@ -497,6 +513,20 @@ class GuardGate extends EventEmitter {
       client.removeListener('close', clientClosed);
       this._pending.delete(pending);
     }
+  }
+
+  _checkAfterTunnelFailure() {
+    if (this._locked || this._transportCheck) return;
+    const generation = this._generation;
+    const previous = this._verification?.promise;
+    const pending = (async () => {
+      if (previous) await previous;
+      if (generation !== this._generation || this._locked) throw abortError();
+      return this.verify();
+    })();
+    this._transportCheck = pending;
+    const complete = () => { if (this._transportCheck === pending) this._transportCheck = null; };
+    pending.then(complete, complete);
   }
 
   lock(reason = 'Locked') {
@@ -509,12 +539,31 @@ class GuardGate extends EventEmitter {
     this._interval = null;
     this._expiryTimer = null;
     this._verification?.controller.abort();
+    this._transportCheck = null;
     for (const pending of this._pending) pending.abort();
     this._pending.clear();
     for (const socket of this._connections) socket.destroy();
     this._connections.clear();
     this._emitStatus();
     this.emit('locked', this.status());
+  }
+
+  async recheck() {
+    if (!this._server?.listening || !this._localProxyUrl) throw new Error('Start the gate before checking it again');
+    if (!this._locked) throw new Error('Guard is already checking or active');
+    this._verification?.controller.abort();
+    this._verification = null;
+    const generation = ++this._generation;
+    this._locked = false;
+    this._healthy = false;
+    this._verifiedAt = null;
+    this._reason = 'Verifying';
+    this._emitStatus();
+    await this.verify();
+    if (generation !== this._generation || !this._server?.listening || !this._isFresh()) throw abortError();
+    this._interval = setInterval(() => { this.verify().catch(() => {}); }, this.checkIntervalMs);
+    this._interval.unref();
+    return this._localProxyUrl;
   }
 
   async stop() {

@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('guard', Object.freeze({
   probe: input => ipcRenderer.invoke('guard:probe', input),
   pin: input => ipcRenderer.invoke('guard:pin', input),
   start: input => ipcRenderer.invoke('guard:start', input),
+  recheck: () => ipcRenderer.invoke('guard:recheck'),
   stop: () => ipcRenderer.invoke('guard:stop'),
   restore: () => ipcRenderer.invoke('guard:restore'),
   onState: callback => {

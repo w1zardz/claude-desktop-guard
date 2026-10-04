@@ -36,8 +36,9 @@ function createAdapter({ platform = process.platform, spawnHelper = spawnNative,
     if (platform !== 'darwin' && platform !== 'win32') throw new Error('Amnezia native mode supports macOS and Windows only');
   }
 
-  async function listInterfaces() {
+  async function listInterfaces({ signal } = {}) {
     supported();
+    if (signal?.aborted) throw new Error('VPN interface discovery cancelled');
     const child = await spawnHelper(['--list'], platform);
     return new Promise((resolve, reject) => {
       let done = false;
@@ -49,10 +50,13 @@ function createAdapter({ platform = process.platform, spawnHelper = spawnNative,
         if (done) return;
         done = true;
         clearTimeout(timer);
+        signal?.removeEventListener('abort', cancelled);
         child.stdin.destroy();
         if (error) child.kill();
         if (error) reject(error); else resolve(result);
       };
+      const cancelled = () => finish(new Error('VPN interface discovery cancelled'));
+      signal?.addEventListener('abort', cancelled, { once: true });
       child.stdin.on('error', () => {});
       child.stdout.on('error', error => finish(error));
       child.stderr.on('error', error => finish(error));
@@ -79,12 +83,14 @@ function createAdapter({ platform = process.platform, spawnHelper = spawnNative,
         } catch (error) { finish(error); }
       });
       child.stdin.end();
+      if (signal?.aborted) cancelled();
     });
   }
 
-  async function openAmnezia(value) {
+  async function openAmnezia(value, { signal } = {}) {
     supported();
     const selected = validateInterface(value, platform);
+    if (signal?.aborted) throw new Error('VPN helper opening cancelled');
     const child = await spawnHelper(['--interface', selected.name, '--index', String(selected.index), '--address', selected.address], platform);
     const session = new EventEmitter();
     // An exit can arrive before caller installs listeners; errors must never crash the app.
@@ -135,6 +141,8 @@ function createAdapter({ platform = process.platform, spawnHelper = spawnNative,
         if (!settled) { settled = true; cleanup.then(() => reject(error), () => reject(error)); }
         else session.emit('error', error);
       };
+      const cancelled = () => fail(new Error('VPN helper opening cancelled'));
+      signal?.addEventListener('abort', cancelled, { once: true });
       child.stdin.on('error', () => {});
       child.stdout.on('error', fail);
       child.stderr.on('error', fail);
@@ -146,7 +154,7 @@ function createAdapter({ platform = process.platform, spawnHelper = spawnNative,
         if (!settled) { settled = true; reject(new Error('VPN helper exited before readiness')); }
         session.emit('exit', code, signal);
       });
-      child.once('close', () => { closed = true; alive = false; notifyClosed(); });
+      child.once('close', () => { closed = true; alive = false; signal?.removeEventListener('abort', cancelled); notifyClosed(); });
       child.stderr.on('data', chunk => {
         stderrBytes += chunk.length;
         if (stderrBytes > OUTPUT_LIMIT) fail(new Error('VPN helper error output exceeds limit'));
@@ -175,6 +183,7 @@ function createAdapter({ platform = process.platform, spawnHelper = spawnNative,
           resolve(session);
         } catch (error) { fail(error); }
       });
+      if (signal?.aborted) cancelled();
     });
   }
 

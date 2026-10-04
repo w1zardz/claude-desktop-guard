@@ -141,6 +141,7 @@ function render(next) {
   $('start-button').hidden = active;
   $('start-button').disabled = busy || !state.desktop || state.transaction || !pinnedMatches || !selectedAvailable || !validMask || (enabledMask && profile.clientMask.region !== state.profile?.expectedCountry);
   $('stop-button').hidden = !active; $('stop-button').disabled = busy;
+  $('recheck-button').hidden = !active || state.phase !== 'locked'; $('recheck-button').disabled = busy;
   $('restore-button').hidden = !state.transaction; $('restore-button').disabled = busy || active;
   $('transaction-note').hidden = !state.transaction;
   const findings = $('findings'); findings.replaceChildren();
@@ -160,7 +161,7 @@ async function perform(command) {
     render(latest);
   }
 }
-for (const command of ['probe','pin','start','stop','restore','interfaces']) $(command + '-button').addEventListener('click', () => perform(command));
+for (const command of ['probe','pin','start','recheck','stop','restore','interfaces']) $(command + '-button').addEventListener('click', () => perform(command));
 $('mask-copy-button').addEventListener('click', () => {
   const exit = checkedExit();
   if (!exit?.timezone || !exit?.country || !$('client-mask-enabled').checked || pending || state.busy || state.gate) return;

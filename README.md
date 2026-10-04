@@ -19,7 +19,7 @@ A desktop companion for **Claude Desktop's Code tab on macOS and Windows**. Sele
 
 ## Download
 
-[Releases](https://github.com/w1zardz/claude-desktop-guard/releases) contain Windows x64 portable `.exe`, macOS Apple Silicon `.zip`, and macOS Intel `.zip`, plus SHA-256 hashes. Builds are unsigned and macOS builds are not notarized. Use your platform's normal application approval flow if it blocks the downloaded build.
+[Releases](https://github.com/w1zardz/claude-desktop-guard/releases) contain Windows x64 portable `.exe` and unpacked `.zip`, macOS Apple Silicon `.zip`, and macOS Intel `.zip`, plus SHA-256 hashes. Builds are unsigned and macOS builds are not notarized. Use your platform's normal application approval flow if it blocks the downloaded build.
 
 ## Use
 
@@ -61,6 +61,25 @@ The helper's IPv4 binding uses macOS `IP_BOUND_IF` and Windows [`IP_UNICAST_IF`]
 The official app has proxy-bypass paths and startup behavior outside the gate's authority. Launcher proxy arguments reduce the initial routing gap but are not a network-layer guarantee. Use OS/network enforcement when direct egress is unacceptable. Strict macOS mode may prevent SSH, direct Git transports, local previews/MCP/browser bridges, or developer programs that ignore HTTP proxy variables from accessing the network.
 
 Project-level `.claude/settings.json` / `.claude/settings.local.json` can override user proxy settings in local claude.ai Code sessions. This tool does not rewrite your project files. Managed-provider sessions have different precedence rules. Pre-existing background supervisors and other processes outside the launched tree also need separate control. See the [official proxy and launcher scope rules](https://code.claude.com/docs/en/network-config).
+
+## Guarded Claude CLI (0.4.0 and later)
+
+Save an explicitly pinned route and enable its timezone/language/region profile in the GUI first. The headless launcher opens an independent gate from that saved profile, checks it before spawning Claude, and coexists with the GUI without changing Desktop or Claude user settings.
+
+```sh
+"/Applications/Claude Desktop Guard.app/Contents/MacOS/Claude Desktop Guard" \
+  --guard-cli --claude-executable /absolute/path/to/claude -- -p "Your prompt"
+```
+
+On Windows, extract the Windows ZIP and invoke the inner `Claude Desktop Guard.exe`; the portable GUI wrapper is not the CLI transport. Pass the absolute path to native `claude.exe` (not a `.cmd` or `.bat` shim). Integrations can inspect `--guard-cli-version`: stdout is one JSON object containing `version` and `headlessCli`.
+
+The child receives proxy variables, `TZ`, `LANG`, `LC_ALL`, `CLAUDE_CODE_PROXY_RESOLVES_HOSTS=1` and `DISABLE_ERROR_REPORTING=1` through its environment and command-line `--settings`. This overrides ordinary project/user environment settings; caller `--settings` and `--setting-sources` are rejected. Optional crash reporting is disabled; mandatory security/region processing is unaffected. stdin/stdout and ordinary child exit status are preserved. A Guard refusal emits `[Claude Desktop Guard]` on stderr and exits with code `78`.
+
+Local managed policy and cached remote policy are inspected at startup and each exit check; conflicting route/profile keys stop launch without printing policy contents. Fresh organization policy received after startup can override CLI settings before the next audit. Arbitrary tools, hooks, MCP servers and background processes may ignore proxy variables. These paths require OS network confinement for a no-direct-egress guarantee; proxy settings alone cannot supply it. macOS strict mode also applies to the CLI when selected in the saved profile.
+
+On cancellation or a failed check, Guard closes its gate/helper and terminates the owned CLI process tree: POSIX uses an isolated process group; Windows uses bounded `taskkill /T /F`. A forcibly killed wrapper cannot run cleanup. Windows descendants after an already-exited leader are not guaranteed to terminate without a Job Object. Integrations must allow graceful termination before escalating a timeout.
+
+When one remote endpoint resets/refuses a tunnel, only that tunnel closes and the selected route is checked again; new CONNECT requests pause until that check succeeds. Failed exit verification still closes all tunnels. For a locked GUI gate, **Повторно проверить и открыть барьер** verifies the same pinned route and restores the same loopback port; Claude can retry without restarting. No automatic recovery or IP re-pinning occurs.
 
 ## Compatibility and configuration safety
 

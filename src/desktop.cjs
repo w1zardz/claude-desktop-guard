@@ -208,6 +208,34 @@ function managedConflicts(state) {
   if (state.code.some(value => proxyEnvKeys(value).length || own(value, 'policyHelper'))) conflicts.push({ code: 'MANAGED_CODE_PROXY', severity: 'error', message: 'Claude Code policy can override the agent proxy or compute settings dynamically.' });
   return conflicts;
 }
+async function auditCliPolicy(options = {}) {
+  const ctx = context(options);
+  const state = await managedState(ctx);
+  const configDir = ctx.env.CLAUDE_CONFIG_DIR || path.join(ctx.home, '.claude');
+  if (!path.isAbsolute(configDir)) fail('UNSAFE_PATH', 'CLAUDE_CONFIG_DIR must be absolute for policy inspection.');
+  // Cached remote policy can outrank command-line env before authentication.
+  // Fresh policy fetched over opaque TLS is outside this pre-launch audit.
+  const remote = (await readObject(path.join(configDir, 'remote-settings.json'), 'Cached Claude Code policy')).value;
+  state.code.push(remote);
+  if (own(remote, 'settings')) {
+    if (!object(remote.settings)) fail('MALFORMED_CONFIG', 'Cached policy settings must be an object.');
+    state.code.push(remote.settings);
+  }
+  const guardedKeys = new Set([...PROXY_KEYS, ...BYPASS_KEYS, 'TZ', 'LANG', 'LC_ALL',
+    'NODE_OPTIONS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'ELECTRON_RUN_AS_NODE',
+    'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'CLAUDE_CODE_PROXY_RESOLVES_HOSTS',
+    'DISABLE_ERROR_REPORTING'].map(key => key.toUpperCase()));
+  for (const value of state.code) {
+    if (own(value, 'policyHelper')) fail('MANAGED_CLI_POLICY', 'Managed Claude Code policy computes settings dynamically; guarded CLI launch cannot verify routing.');
+    if (!own(value, 'env')) continue;
+    if (!object(value.env)) fail('MALFORMED_CONFIG', 'The managed settings env block must be an object.');
+    if (Object.keys(value.env).some(key => guardedKeys.has(key.toUpperCase()))) {
+      fail('MANAGED_CLI_POLICY', 'Managed Claude Code settings can override the CLI route or client profile. Ask the administrator to configure routing.');
+    }
+  }
+  // Return no policy contents: they can include organization credentials.
+  return [];
+}
 async function readDesktopAudit(options = {}) {
   const ctx = context(options), findings = [];
   try {
@@ -458,4 +486,4 @@ async function launchDesktop(options = {}) {
   });
 }
 
-module.exports = { discoverDesktop, isDesktopRunning, readDesktopAudit, installDesktopProxy, restoreDesktopProxy, launchDesktop, MIN_VERSION, versionSupported, buildLaunch };
+module.exports = { discoverDesktop, isDesktopRunning, readDesktopAudit, auditCliPolicy, installDesktopProxy, restoreDesktopProxy, launchDesktop, MIN_VERSION, versionSupported, buildLaunch };

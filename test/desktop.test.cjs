@@ -42,6 +42,28 @@ async function existingProfile(f, config = {}, metaExtras = {}) {
   return { configId, configPath, metaPath };
 }
 
+test('CLI policy audit rejects managed route/profile overrides without disclosing values', async t => {
+  const f = await fixture(t);
+  for (const key of ['HTTPS_PROXY', 'No_Proxy', 'TZ', 'LANG', 'LC_ALL', 'NODE_OPTIONS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST']) {
+    shellMock(t, { managed: { desktop: [], code: [{ source: 'HKLM', values: { Settings: JSON.stringify({ env: { [key]: 'private-fixture-value' } }) } }] } });
+    await assert.rejects(desktop.auditCliPolicy(f.options), error => {
+      assert.equal(error.code, 'MANAGED_CLI_POLICY');
+      assert.equal(error.message.includes('private-fixture-value'), false);
+      return true;
+    });
+  }
+  const file = path.join(f.options.env.ProgramFiles, 'ClaudeCode', 'managed-settings.json');
+  shellMock(t);
+  await jsonWrite(file, { policyHelper: 'private-policy-command' });
+  await assert.rejects(desktop.auditCliPolicy(f.options), { code: 'MANAGED_CLI_POLICY' });
+  await jsonWrite(file, { env: [] });
+  await assert.rejects(desktop.auditCliPolicy(f.options), { code: 'MALFORMED_CONFIG' });
+  await jsonWrite(file, { permissions: { defaultMode: 'default' }, env: { UNRELATED_KEY: 'private-fixture-value' } });
+  assert.deepEqual(await desktop.auditCliPolicy(f.options), []);
+  await fs.writeFile(file, '{');
+  await assert.rejects(desktop.auditCliPolicy(f.options), { code: 'MALFORMED_CONFIG' });
+});
+
 test('new profile restores existing metadata entries and deletes only owned files', async t => {
   const f = await fixture(t), metaPath = path.join(f.library, '_meta.json');
   const original = { entries: [{ id: 'other-profile', name: 'Other' }], theme: 'dark' };
@@ -302,4 +324,22 @@ test('macOS strict sandbox permits gate TCP and denies another loopback port', {
   assert.equal(result.allowed.ok, true);
   assert.equal(result.denied.ok, false);
   assert.ok(['EPERM', 'EACCES'].includes(result.denied.code), `Expected sandbox denial, received ${result.denied.code}`);
+});
+
+
+test('CLI rejects cached remote policy overrides and alternate config roots safely', async t => {
+  const f = await fixture(t);
+  const remote = path.join(f.home, '.claude', 'remote-settings.json');
+  await jsonWrite(remote, { settings: { env: { TZ: 'private-fixture-value' } } });
+  await assert.rejects(desktop.auditCliPolicy(f.options), error => error.code === 'MANAGED_CLI_POLICY' && !error.message.includes('private-fixture-value'));
+  await jsonWrite(remote, { env: { CLAUDE_CODE_PROXY_RESOLVES_HOSTS: '0' } });
+  await assert.rejects(desktop.auditCliPolicy(f.options), { code: 'MANAGED_CLI_POLICY' });
+  await jsonWrite(remote, { settings: { env: { UNRELATED: 'private-fixture-value' } } });
+  assert.deepEqual(await desktop.auditCliPolicy(f.options), []);
+  const alternate = path.join(f.base, 'alternate');
+  await jsonWrite(path.join(alternate, 'remote-settings.json'), { env: { https_proxy: 'private-fixture-value' } });
+  await assert.rejects(desktop.auditCliPolicy({ ...f.options, env: { ...f.options.env, CLAUDE_CONFIG_DIR: alternate } }), { code: 'MANAGED_CLI_POLICY' });
+  await assert.rejects(desktop.auditCliPolicy({ ...f.options, env: { ...f.options.env, CLAUDE_CONFIG_DIR: 'relative' } }), { code: 'UNSAFE_PATH' });
+  await fs.writeFile(remote, '{');
+  await assert.rejects(desktop.auditCliPolicy(f.options), { code: 'MALFORMED_CONFIG' });
 });

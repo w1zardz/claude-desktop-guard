@@ -15,6 +15,7 @@ class FakeGate extends EventEmitter {
   async start() { await this.options.probe(); this.healthy=true;return 'http://127.0.0.1:45678'; }
   status() { return { healthy:this.healthy,locked:!this.healthy,reason:this.healthy?'':'fixture failure' }; }
   lock() { this.healthy=false;this.emit('locked'); }
+  async recheck() { await this.options.probe(); this.healthy=true; return 'http://127.0.0.1:45678'; }
   async stop() { this.healthy=false; }
 }
 async function setup(t, overrides={}, dependencies={}) {
@@ -260,4 +261,18 @@ test('proxy probe paused during binding cannot open its connection after shutdow
   while (!bound) await new Promise(resolve => setImmediate(resolve));
   await session.shutdown(); bound({ enabled: false }); await rejected;
   assert.equal(probes, 0); assert.equal(session.pendingProbe, null);
+});
+
+
+test('recovery verifies original pinned route without settings writes or Claude restart', async t => {
+  const { session, calls } = await setup(t);
+  await session.start({ profile }); const before = [...calls];
+  session.gate.lock();
+  assert.equal((await session.recheck()).phase, 'active');
+  assert.deepEqual(calls, before);
+  session.gate.lock();
+  session.gate.options.probe = async () => { throw new Error('fixture changed route'); };
+  await assert.rejects(session.recheck(), /fixture changed route/);
+  assert.equal(session.phase, 'locked'); assert.deepEqual(calls, before);
+  await session.stop(); await assert.rejects(session.recheck(), /Сначала/);
 });

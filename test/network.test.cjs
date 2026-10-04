@@ -248,7 +248,7 @@ test('malformed and private CONNECT targets never reach upstream', async t => {
   }
 });
 
-test('upstream failure locks gate and never falls back to direct transport', async t => {
+test('one upstream CONNECT failure closes only that tunnel and never dials directly', async t => {
   let calls = 0;
   const gate = makeGate(t, { connect: async (proxy, authority) => {
     calls++;
@@ -258,10 +258,10 @@ test('upstream failure locks gate and never falls back to direct transport', asy
   } });
   const local = await gate.start();
   await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
-  assert.equal(gate.status().locked, true);
+  assert.equal(gate.status().locked, false);
   await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
-  assert.equal(calls, 1);
-  await assert.rejects(gate.verify(), /explicit start/);
+  assert.equal(calls, 2);
+  assert.equal(gate.status().healthy, true);
 });
 
 test('locked CONNECT handles asynchronous rejection write errors without reopening', async t => {
@@ -333,7 +333,7 @@ test('local reset during CONNECT cancels pending transport and destroys late ups
   assert.equal(gate._pending.size, 0);
 });
 
-test('upstream socket errors still lock verified gate and close local tunnels', async t => {
+test('remote reset closes its tunnel and rechecks the pinned route', async t => {
   const upstream = new PassThrough();
   const gate = makeGate(t, { connect: async () => upstream });
   const local = await gate.start();
@@ -341,8 +341,8 @@ test('upstream socket errors still lock verified gate and close local tunnels', 
   assert.match(await collectHeader(socket), /^HTTP\/1\.1 200/);
   upstream.destroy(Object.assign(new Error('upstream reset'), { code: 'ECONNRESET' }));
   await waitUntil(() => socket.destroyed);
-  assert.equal(gate.status().locked, true);
-  assert.match(gate.status().reason, /Upstream tunnel error/);
+  assert.equal(gate.status().locked, false);
+  assert.equal(gate.status().healthy, true);
 });
 
 test('lock destroys active and pending native socket tunnels', async t => {
@@ -522,4 +522,68 @@ test('HTTPS probe rejects plaintext URL, credentials and private destinations be
   for (const target of ['http://api.ipify.org/', 'https://user:pass@api.ipify.org/', 'https://127.0.0.1/', 'https://api.ipify.org:8443/', 'https://api.ipify.org/#fragment']) {
     assert.throws(() => requestJsonViaProxy('http://127.0.0.1:9', target), undefined, target);
   }
+});
+
+
+test('explicit recovery keeps proxy port, rejects changed exit and blocks during verification', async t => {
+  let mode = 'good', release;
+  const gate = makeGate(t, { probe: async () => {
+    if (mode === 'pending') return new Promise(resolve => { release = resolve; });
+    return { ip: mode === 'changed' ? '4.4.4.4' : EXIT.ip, country: EXIT.country, timezone: EXIT.timezone };
+  } });
+  const local = await gate.start();
+  gate.lock('fixture interruption'); mode = 'changed';
+  await assert.rejects(gate.recheck(), /IP changed/);
+  assert.equal(gate.status().localProxyUrl, local); assert.equal(gate.status().locked, true);
+  mode = 'pending';
+  const checking = gate.recheck();
+  await waitUntil(() => Boolean(release));
+  assert.match(await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 503/);
+  // Requests remain denied while the explicit check is pending.
+  release(EXIT);
+  assert.equal(await checking, local); assert.equal(gate.status().healthy, true);
+  await assert.rejects(gate.recheck(), /already/);
+});
+
+test('endpoint failure plus failed route verification still locks all tunnels', async t => {
+  let fail = false;
+  const gate = makeGate(t, { probe: async () => {
+    if (fail) throw new Error('route unavailable');
+    return EXIT;
+  }, connect: async () => { throw new Error('endpoint unavailable'); } });
+  const local = await gate.start(); fail = true;
+  await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
+  await waitUntil(() => gate.status().locked);
+  assert.match(gate.status().reason, /route unavailable/);
+});
+
+test('transport retry pauses new CONNECT until the same pinned exit is verified', async t => {
+  let held = false, release, calls = 0;
+  const gate = makeGate(t, { probe: async () => held ? new Promise(resolve => { release = resolve; }) : EXIT,
+    connect: async () => { calls++; throw new Error('endpoint reset'); } });
+  const local = await gate.start(); held = true;
+  await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
+  await waitUntil(() => Boolean(release));
+  assert.match(await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 503/);
+  assert.equal(calls, 1); assert.equal(gate.status().locked, false);
+  held = false; release(EXIT);
+  await waitUntil(() => !gate._transportCheck);
+  assert.equal(gate.status().healthy, true);
+  await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
+  assert.equal(calls, 2);
+});
+
+test('transport failure requires a fresh probe after an already-running periodic probe', async t => {
+  const releases = []; let hold = false;
+  const gate = makeGate(t, { probe: async () => hold ? new Promise(resolve => releases.push(resolve)) : EXIT,
+    connect: async () => { throw new Error('endpoint failed'); } });
+  const local = await gate.start(); hold = true;
+  const periodic = gate.verify(); await waitUntil(() => releases.length === 1);
+  await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
+  releases[0](EXIT); await periodic;
+  await waitUntil(() => releases.length === 2);
+  assert.ok(gate._transportCheck, 'pre-failure observation must not finish recovery');
+  assert.match(await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 503/);
+  hold = false; releases[1](EXIT); await waitUntil(() => !gate._transportCheck);
+  assert.equal(gate.status().healthy, true);
 });

@@ -85,7 +85,12 @@ class GuardSession extends EventEmitter {
     });
   }
   async openRouting(profile, persistent = false) {
-    if (profile.mode !== 'amnezia') return { proxyUrl: profile.proxyUrl, assertAlive: () => { if (this.shuttingDown) throw new Error('Guard завершает работу.'); }, async close() {} };
+    if (profile.mode !== 'amnezia') {
+      const route = { proxyUrl: profile.proxyUrl, assertAlive: () => { if (this.shuttingDown) throw new Error('Guard завершает работу.'); },
+        close: async () => { if (this.routing === route) this.routing = null; } };
+      if (persistent) this.routing = route;
+      return route;
+    }
     const opening = this.openNativeRouting(profile, persistent);
     this.openings.add(opening);
     try { return await opening; } finally { this.openings.delete(opening); }
@@ -192,7 +197,7 @@ class GuardSession extends EventEmitter {
           expectedCountry: profile.expectedCountry, probe: check });
         this.gate = gate;
         gate.on('status', () => this.emit('change', this.snapshot()));
-        gate.on('locked', () => { this.phase = 'locked'; this.reason = gate.status().reason; this.log('Барьер заблокирован. Действующие и новые туннели закрыты.'); });
+        gate.on('locked', () => { this.phase = 'locked'; this.reason = gate.status().reason; this.log(`Барьер заблокирован: ${this.reason}. Действующие и новые туннели закрыты.`); });
         route.assertAlive();
         const proxyUrl = await gate.start();
         route.assertAlive();
@@ -219,6 +224,24 @@ class GuardSession extends EventEmitter {
         // An interrupted install may have written only part of its durable journal.
         this.transaction = await this.transactionPending();
         throw e;
+      }
+    });
+  }
+  async recheck() {
+    return this.exclusive(async () => {
+      if (!this.gate || !this.routing) throw new Error('Сначала запустите барьер.');
+      this.phase = 'checking'; this.reason = '';
+      try {
+        this.routing.assertAlive();
+        await this.gate.recheck();
+        this.routing.assertAlive();
+        if (!this.gate.status().healthy) throw new Error('Выход не прошёл повторную проверку.');
+        this.phase = 'active'; this.reason = '';
+        this.log('Выбранный маршрут повторно проверен. Барьер открыт на прежнем порту; перезапуск Claude не требуется.');
+        return this.snapshot();
+      } catch (error) {
+        this.gate.lock(error.message);
+        throw error;
       }
     });
   }

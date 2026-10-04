@@ -70,6 +70,9 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
           CDG_HELPER_ARCH: ${{ matrix.arch }}
+      - run: npm run test:packaged-cli
+        env:
+          CDG_PACKAGED_ARCH: ${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-guard-${{ matrix.target }}-${{ matrix.arch }}
