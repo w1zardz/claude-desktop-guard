@@ -81,7 +81,7 @@ Local managed policy and cached remote policy are inspected at startup and each 
 
 On cancellation or a failed check, Guard closes its gate/helper and terminates the owned CLI process tree: POSIX uses an isolated process group; Windows uses bounded `taskkill /T /F`. A forcibly killed wrapper cannot run cleanup. Windows descendants after an already-exited leader are not guaranteed to terminate without a Job Object. Integrations must allow graceful termination before escalating a timeout.
 
-When one remote endpoint resets/refuses a tunnel, only that tunnel closes and the selected route is checked again; new CONNECT requests pause until that check succeeds. Failed exit verification still closes all tunnels. For a locked GUI gate, **Повторно проверить и открыть барьер** verifies the same pinned route and restores the same loopback port; Claude can retry without restarting. No automatic recovery or IP re-pinning occurs.
+When one remote endpoint resets/refuses a tunnel, only that tunnel closes and the selected route is checked again; unrelated CONNECT requests remain available while the last pinned-exit observation is fresh. A pending recheck never extends that observation's lifetime. Failed exit verification still closes all tunnels. For a locked GUI gate, **Повторно проверить и открыть барьер** verifies the same pinned route and restores the same loopback port; Claude can retry without restarting. No automatic recovery or IP re-pinning occurs.
 
 ## Compatibility and configuration safety
 

@@ -557,33 +557,65 @@ test('endpoint failure plus failed route verification still locks all tunnels', 
   assert.match(gate.status().reason, /route unavailable/);
 });
 
-test('transport retry pauses new CONNECT until the same pinned exit is verified', async t => {
+test('one failed endpoint does not pause healthy CONNECT while the pinned exit is rechecked', async t => {
   let held = false, release, calls = 0;
+  const healthy = new PassThrough();
   const gate = makeGate(t, { probe: async () => held ? new Promise(resolve => { release = resolve; }) : EXIT,
-    connect: async () => { calls++; throw new Error('endpoint reset'); } });
+    connect: async (_proxy, target) => {
+      calls++;
+      if (target === 'api.anthropic.com:443') throw new Error('endpoint reset');
+      return healthy;
+    } });
   const local = await gate.start(); held = true;
   await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
   await waitUntil(() => Boolean(release));
-  assert.match(await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 503/);
-  assert.equal(calls, 1); assert.equal(gate.status().locked, false);
+  const socket = client(t, local, 'CONNECT bridge.claudeusercontent.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n');
+  assert.match(await collectHeader(socket), /^HTTP\/1\.1 200/);
+  assert.equal(calls, 2); assert.equal(gate.status().locked, false);
   held = false; release(EXIT);
   await waitUntil(() => !gate._transportCheck);
   assert.equal(gate.status().healthy, true);
-  await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
-  assert.equal(calls, 2);
+  assert.equal(socket.destroyed, false);
 });
 
 test('transport failure requires a fresh probe after an already-running periodic probe', async t => {
   const releases = []; let hold = false;
+  const healthy = new PassThrough();
   const gate = makeGate(t, { probe: async () => hold ? new Promise(resolve => releases.push(resolve)) : EXIT,
-    connect: async () => { throw new Error('endpoint failed'); } });
+    connect: async (_proxy, target) => {
+      if (target === 'api.anthropic.com:443') throw new Error('endpoint failed');
+      return healthy;
+    } });
   const local = await gate.start(); hold = true;
   const periodic = gate.verify(); await waitUntil(() => releases.length === 1);
   await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
   releases[0](EXIT); await periodic;
   await waitUntil(() => releases.length === 2);
-  assert.ok(gate._transportCheck, 'pre-failure observation must not finish recovery');
-  assert.match(await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 503/);
+  assert.ok(gate._transportCheck, 'pre-failure observation must not finish recheck');
+  const socket = client(t, local, 'CONNECT bridge.claudeusercontent.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n');
+  assert.match(await collectHeader(socket), /^HTTP\/1\.1 200/);
   hold = false; releases[1](EXIT); await waitUntil(() => !gate._transportCheck);
   assert.equal(gate.status().healthy, true);
+});
+
+test('a successful pending CONNECT survives another endpoint failure but closes on exit drift', async t => {
+  let held = false, releaseProbe, releaseTunnel;
+  const healthy = new PassThrough();
+  const gate = makeGate(t, { probe: async () => held ? new Promise(resolve => { releaseProbe = resolve; }) : EXIT,
+    connect: async (_proxy, target) => {
+      if (target === 'api.anthropic.com:443') throw new Error('endpoint failed');
+      return new Promise(resolve => { releaseTunnel = resolve; });
+    } });
+  const local = await gate.start(); held = true;
+  const socket = client(t, local, 'CONNECT bridge.claudeusercontent.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n');
+  const response = collectHeader(socket);
+  await waitUntil(() => Boolean(releaseTunnel));
+  await collectHeader(client(t, local, 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n'));
+  await waitUntil(() => Boolean(releaseProbe));
+  releaseTunnel(healthy);
+  assert.match(await response, /^HTTP\/1\.1 200/);
+  releaseProbe({ ...EXIT, ip: '9.9.9.9' });
+  await waitUntil(() => gate.status().locked && socket.destroyed && healthy.destroyed);
+  assert.match(gate.status().reason, /Exit IP changed/);
+  assert.match(await collectHeader(client(t, local, 'CONNECT bridge.claudeusercontent.com:443 HTTP/1.1\r\nHost: ignored\r\n\r\n')), /^HTTP\/1\.1 503/);
 });

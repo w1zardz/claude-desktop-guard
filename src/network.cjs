@@ -433,10 +433,9 @@ class GuardGate extends EventEmitter {
   }
 
   async _handleConnect(request, client, head) {
-    if (this._transportCheck && !this._locked) {
-      if (!client.destroyed) client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
-      return;
-    }
+    // A failed endpoint does not invalidate a still-fresh exit observation.
+    // Keep unrelated tunnels usable while the same pinned route is rechecked.
+    // Verification failure, expiry or route drift still locks every tunnel.
     if (!this._isFresh()) {
       if (!this._locked && this._verifiedAt !== null) this.lock('Exit verification became stale');
       if (!client.destroyed) client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
@@ -477,11 +476,6 @@ class GuardGate extends EventEmitter {
       ]);
       if (!upstream || typeof upstream.pipe !== 'function' || typeof upstream.destroy !== 'function') throw new Error('Invalid upstream tunnel socket');
       // Lock or stop can happen while CONNECT is in flight. Never send 200 after it.
-      if (this._transportCheck && !this._locked) {
-        upstream.destroy();
-        if (!client.destroyed) client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
-        return;
-      }
       if (generation !== this._generation || !this._isFresh() || client.destroyed || pending.signal.aborted) {
         upstream.destroy();
         if (generation === this._generation && !this._locked && !client.destroyed) this.lock('Exit verification became stale');
